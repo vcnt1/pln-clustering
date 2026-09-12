@@ -1,78 +1,156 @@
-# Agrupamento de PLN
+# Análise de Humor do Cliente em Atendimento
 
-Pipeline em Python para agrupar decisões judiciais brasileiras por similaridade
-semântica.
+Trabalho de Conclusão de Curso (Engenharia de Dados). Ferramenta que mede em
+tempo real o estado de humor de clientes durante atendimentos de suporte de
+acomodações de hotelaria, com base no histórico de conversa de cada cliente.
 
 Status: projeto em fase de desenho; a implementação e a configuração
 reprodutível ainda não estão disponíveis.
 
-## Fluxo
+## Contexto e Motivação
+
+**Problema**: no atendimento humano de clientes de acomodações de hotelaria, é
+difícil garantir um atendimento padronizado e com qualidade consistente, pois
+os atendentes não têm uma forma objetiva de saber como abordar cada perfil de
+cliente.
+
+**Por que importa**: o atendimento é parte crucial da venda e do pós-venda.
+Padronizar e categorizar continuamente esses atendimentos pode gerar ganhos de
+eficiência, qualidade de serviço, satisfação do cliente e marketing orgânico.
+
+**Trabalho relacionado**: ferramentas existentes ingerem conversas via API do
+WhatsApp, removem texto padrão/mensagens automáticas, mascaram dados sensíveis
+e delegam a um LLM (ex.: Gemini) a categorização do problema de estadia e sua
+urgência.
+
+**Diferencial deste projeto**: em vez de delegar a categorização a um LLM
+externo, o sistema treina e usa um modelo próprio de machine learning para
+calcular, em tempo real, uma "temperatura de humor" a partir do histórico de
+conversa do próprio cliente. Esse dado fica disponível ao atendente durante o
+atendimento.
+
+**Extensão futura (se houver tempo)**: sugerir ao atendente como responder,
+com base no histórico de atendimentos bem e mal avaliados na plataforma.
+
+## Arquitetura
 
 ```text
-coleta -> transformação -> tokenização/embeddings -> agrupamento -> avaliação
+              ┌──────────────┐   GET mood     ┌──────────────┐
+ cliente ---> │  Backend API │ -------------> │   Frontend    │
+   msg        │  (DuckDB)    │                │  (chat + mood)│
+              └──────┬───────┘                └──────────────┘
+                     │ mensagem            ^
+                     v                     │ mood
+              ┌──────────────┐             │
+              │ Módulo de ML │ ------------┘
+              │ ingest/      │
+              │ transform/   │
+              │ train/infer  │
+              └──────────────┘
 ```
 
-Cada etapa será um processo Python independente. O DuckDB registrará a
-identidade do documento, hashes de conteúdo, configuração dos artefatos
-derivados, versões, status e erros. Um `Makefile` executará as etapas; o código
-de cada etapa usará esse registro para fornecer idempotência, novas tentativas
-e invalidação após alterações na entrada ou na configuração. Prefira escritas
-sequenciais no arquivo DuckDB.
+O projeto terá três componentes:
 
-Artefatos de documentos inalterados podem ser reutilizados. O agrupamento e a
-avaliação são executados sobre um snapshot versionado do corpus; adicionar
-documentos a um grupo existente exige uma política de atribuição específica
-para cada algoritmo.
+1. **Backend API**: único processo com acesso de escrita ao DuckDB. Recebe
+   mensagens, persiste e expõe o humor atual do cliente.
+2. **Frontend**: interface de chat simples, exibe o humor do cliente como
+   emoji ao lado do nome, por conversa.
+3. **Módulo de Machine Learning**: processo separado, sem acesso direto de
+   escrita ao DuckDB da API. Consome mensagens e devolve o humor calculado
+   ao Backend API, que persiste o resultado.
 
-## Etapas
+**Persistência (decisão fechada)**: o DuckDB é acessado por um único
+processo escritor (Backend API), pois o DuckDB usa lock exclusivo de
+arquivo por processo e não é adequado para escrita concorrente
+multi-processo nem para ingestão transacional linha a linha em alto volume.
+O módulo de ML roda como processo separado e troca dados com a API por
+chamada HTTP interna (síncrona, MVP) ou fila (assíncrona, se o volume
+exigir); não acessa o arquivo DuckDB diretamente.
 
-1. **Coleta**: um web scraper descobre PDFs de decisões judiciais, faz o
-	download para o armazenamento local e registra no DuckDB a URL de origem,
-	hora da coleta, identificador estável da decisão (quando disponível),
-	caminho do arquivo e hash do PDF. Reutilize arquivos com hash inalterado;
-	preserve a proveniência da origem e as falhas de download. A extração de
-	texto do PDF é o primeiro artefato de transformação.
-    https://esaj.tjce.jus.br/cjsg/resultadoCompleta.do
-2. **Transformação**: normalize a codificação e os espaços em branco, remova
-	 trechos padronizados e duplicatas, e preserve os textos bruto e limpo.
-	 - Preserve por padrão maiúsculas/minúsculas, termos jurídicos, negações,
-		 datas, números, citações e URLs; eles podem ter significado jurídico.
-	 - Trate stop words em português e lematização com spaCy como experimentos,
-		 após validar o efeito em uma amostra representativa.
-3. **Tokenização e embeddings**: tokenize as decisões limpas e gere embeddings
-	 com um checkpoint local e fixado do BERTimbau. Comece com mean pooling que
-	 considere a máscara de atenção e vetores normalizados; divida decisões que
-	 excedam o limite de 512 tokens do BERTimbau e agregue seus embeddings.
-	 Persista a revisão do modelo, versão do pré-processamento, dimensão e
-	 local de armazenamento dos vetores.
-4. **Agrupamento**: execute múltiplos algoritmos sobre os vetores e persista o
-	 rótulo atribuído por cada execução.
-5. **Avaliação**: compare as execuções e mantenha parâmetros, métricas e
-	 resultados.
+## Backend API
+
+- `POST /v1alpha1/ingest`
+  - Corpo: `{"conversation_id": "string", "customer_id": "string", "role": "customer|agent", "message": "string", "timestamp": "ISO 8601"}`
+  - Resposta: `200 OK` (mensagem persistida) ou `202 Accepted` (se o cálculo de
+    humor for assíncrono).
+  - Persiste a mensagem no DuckDB; mensagens com `role=agent` são
+    armazenadas mas não entram no cálculo de humor do cliente.
+- `GET /v1alpha1/customer/<id>/mood`
+  - Resposta: `{"customer_id": "string", "score": number, "scale": "string", "model_version": "string", "computed_at": "ISO 8601"}`.
+  - `404` se o cliente não tiver mensagens ainda.
+
+Erros a cobrir: `400` (payload inválido), `404` (cliente/conversa
+inexistente), `413` (mensagem excede tamanho máximo), `429` (rate limit).
+Autenticação/autorização entre serviços ainda não definida.
+
+Persistência em DuckDB, com escritas sequenciais dentro do processo da API.
+
+## Frontend
+
+Aplicação de chat simples. Para cada conversa exibida, mostra um emoji ao lado
+do nome do cliente representando seu humor atual, obtido via
+`GET /v1alpha1/customer/<id>/mood`.
+
+## Módulo de Machine Learning
+
+1. **Ingest**: inicialmente, dados sintéticos de conversas de clientes para
+   bootstrap do treino; em produção, o fluxo de mensagens recebido via
+   `POST /v1alpha1/ingest`.
+2. **Transform**: limpeza e extração de features a partir do texto das
+   mensagens e do histórico do cliente.
+3. **Train**: treino do modelo sobre o corpus sintético (e, depois, dados
+   reais) para prever a temperatura de humor.
+4. **Infer**: a cada nova mensagem do cliente, calcula em tempo real a
+   temperatura de humor atualizada, usada pelo Backend API para responder ao
+   endpoint de humor.
 
 ## Decisões em Aberto
 
-- **Algoritmos de agrupamento**: compare inicialmente K-Means e HDBSCAN.
-	Registre o snapshot do corpus, normalização, métrica de distância, semente
-	aleatória, parâmetros, tamanhos dos grupos e fração de ruído do HDBSCAN.
-- **Métricas**: use Silhouette com a distância pretendida e Davies-Bouldin
-	para execuções baseadas em centróides; adicione estabilidade entre amostras
-	e revisão de especialistas sobre decisões representativas. Se existirem
-	casos rotulados, use ARI ou NMI.
-- **Estratégia de embeddings**: compare a base com BERTimbau a um modelo de
-	embeddings de sentenças compatível com português.
-- **Esquema de dados**: decida se os vetores serão armazenados no DuckDB ou
-	referenciados a partir de arquivos versionados e defina o armazenamento da
-	associação entre documentos e execuções de agrupamento.
+- **Definição de "humor"**: escala contínua (temperatura) vs. categorias
+  discretas; isso define o mapeamento para emojis no frontend.
+- **Geração de dados sintéticos**: estratégia para simular perfis de clientes
+  e conversas plausíveis para o treino inicial.
+- **Arquitetura do modelo**: features clássicas + classificador/regressor vs.
+  embeddings de texto + modelo; trade-off de custo/latência para inferência
+  em tempo real.
+- **Atualização do modelo**: re-treino periódico vs. atualização incremental
+  por cliente conforme novas mensagens chegam.
+- **Esquema de dados no DuckDB**: tabelas para clientes, mensagens, histórico
+  de humor por mensagem/conversa, e versão do modelo usado em cada inferência.
+- **Stack do frontend**: framework a definir; consumirá as duas rotas do
+  Backend API.
+- **Atualização do humor no frontend**: polling, SSE ou WebSocket — decide
+  o quão "tempo real" a exibição é.
+- **Sugestão de respostas (extensão futura)**: fora de escopo do MVP; exige
+  um campo de avaliação de atendimento que ainda não existe no modelo de
+  dados.
+
+## Metodologia e Avaliação (a definir)
+
+Itens obrigatórios antes de iniciar o treino do modelo, ainda em aberto:
+
+- **Origem do rótulo/ground truth**: como cada mensagem ou conversa recebe
+  um valor de humor de referência (anotação manual, heurística, proxy como
+  CSAT pós-atendimento).
+- **Orçamento de latência**: meta de tempo de resposta por mensagem (ex.:
+  p95 abaixo de um limite definido), que orienta a escolha entre features
+  clássicas e embeddings.
+
+## Ética e Privacidade
+
+Conversas de clientes são dados sensíveis mesmo quando o bootstrap usa
+dados sintéticos. Definir antes de usar dados reais: base legal (LGPD),
+mascaramento/anonimização de PII, política de retenção, e avaliação de
+viés do modelo entre diferentes perfis linguísticos de clientes.
 
 ## Ambiente
 
 Todas as dependências Python ficarão em `.venv`. Este é um ambiente
-provisório de desenvolvimento; fixe as versões e adicione um manifesto de
-dependências antes da implementação.
+provisório de desenvolvimento; pin de versões e manifesto de dependências
+antes da implementação.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install duckdb transformers torch scikit-learn hdbscan requests pypdf
+pip install duckdb fastapi uvicorn pydantic scikit-learn
 ```
