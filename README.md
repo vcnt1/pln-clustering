@@ -145,12 +145,16 @@ viés do modelo entre diferentes perfis linguísticos de clientes.
 
 ## Ambiente
 
-Todas as dependências Python ficarão em `.venv`. Este é um ambiente
-provisório de desenvolvimento; pin de versões e manifesto de dependências
-antes da implementação.
+Python 3.12 é a versão exigida para `mood-api` e `mood-ml`, cada um com seu
+próprio `.venv`. Use os scripts na raiz do repositório para reproduzir o
+ambiente:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install duckdb fastapi uvicorn pydantic scikit-learn
+./setup-mood-api.sh   # cria mood-api/.venv (Python 3.12) e instala requirements.txt
+./setup-mood-ml.sh    # cria mood-ml/.venv (Python 3.12) e instala requirements.txt
+./setup-chat-app.sh   # roda npm install em chat-app
+./setup.sh            # roda os três acima em sequência
 ```
+
+Os scripts falham com uma mensagem clara se `python3.12` não estiver
+disponível, ou se um `.venv` existente tiver sido criado com outra versão.
