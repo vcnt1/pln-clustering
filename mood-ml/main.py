@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from mood_ml.infer.predict import router as infer_router
+from infer.predict import router as infer_router
 
 app = FastAPI(title="mood-ml", version="0.1.0")
 
