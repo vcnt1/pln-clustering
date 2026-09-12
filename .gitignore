@@ -178,6 +178,15 @@ dmypy.json
 # pytype static type analyzer
 .pytype/
 
+# Node / React (chat-app)
+node_modules/
+dist/
+.env.local
+
+# DuckDB data files
+*.duckdb
+data/
+
 # Cython debug symbols
 cython_debug/
 
