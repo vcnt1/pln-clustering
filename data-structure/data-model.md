@@ -2,13 +2,38 @@
 
 Descreve a estrutura de dados que será implementada no projeto, desde a mensagem recebida pelo Backend API até o humor exibido no frontend e os artefatos usados para treinar o modelo.
 
-Documento **prescritivo**: define entidades, esquemas, chaves e contratos entre os componentes ([mood-api/](../mood-api/), [mood-ml/](../mood-ml/), [chat-app/](../chat-app/)). As **transformações** (limpeza, mascaramento de PII, extração de features, rotulagem e mapeamento de score para categoria) são descritas apenas pelo contrato de entrada e saída. A lógica fica em aberto para implementações futuras (seção 6).
+Documento **prescritivo**: define entidades, esquemas, chaves e contratos entre os componentes ([mood-api/](../mood-api/), [mood-ml/](../mood-ml/), [chat-app/](../chat-app/)). Está subordinado à [constituição](../decisions/constitution.md) e reflete os ADRs aceitos em [decisions/](../decisions/).
 
 Convenções:
 
 - **Planejado**: estrutura a implementar.
+- **Decidido (ADR-000N)**: regra fechada por ADR aceito. Alterá-la exige um novo ADR que marque o anterior como *superseded*.
+- **Em aberto**: decisão ainda não tomada. O campo ou a tabela existe, mas o conteúdo ou a regra dependem dela (inventário em 9.2).
 - **Scaffold atual**: o que o código já faz hoje, quando difere do planejado (seção 10).
-- **Em aberto**: decisão ainda não tomada. O campo ou a tabela existe, mas o conteúdo ou a regra dependem dela.
+
+---
+
+## 0. Constituição e decisões vigentes
+
+Os princípios da [constituição](../decisions/constitution.md) são invioláveis; este modelo existe para torná-los verificáveis no esquema.
+
+| Princípio | O que impõe ao modelo de dados | Onde aparece |
+|---|---|---|
+| **P1** — Escritor único no DuckDB | Só o mood-api escreve o `.duckdb`. O mood-ml recebe dados por HTTP (online) ou arquivo exportado (offline) | 1, 3, 4.2 |
+| **P2** — `mood_scores` é append-only | Sem `UPDATE`/`DELETE`; humor atual é derivado por view | 3.4, 3.7 |
+| **P3** — Nunca gravar score de fallback | Falha vira `inference_failures`; `model_version` de placeholder é rejeitada | 2.2, 3.6 |
+| **P4** — T1 e T3 idênticos no treino e na inferência | `feature_spec_version` e `history_window` no manifesto amarram o contrato de features | 4.4, 6 |
+| **P5** — Nenhum dado com PII sai do DuckDB | `display_name` fora de snapshots/datasets; `detail` sem texto de conversa; `customer_id` pseudônimo | 3.6, 4.2, 8 |
+
+ADRs aceitos, todos de 2026-09-17:
+
+| ADR | Decisão | Seções afetadas |
+|---|---|---|
+| [ADR-0001](../decisions/ADR-0001-escala-do-humor.md) | Escala contínua `-1 to 1`, `mood_label` nulo no MVP | 2.2, 2.3, 3.4, 3.5, 6 (T6) |
+| [ADR-0002](../decisions/ADR-0002-origem-do-ground-truth.md) | Ground truth do MVP é o `generated_label` sintético | 4.1, 4.3, 6 (T4) |
+| [ADR-0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) | Abertura, encerramento manual e reabertura de conversa | 2.1, 2.4, 3.2, 7 |
+| [ADR-0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Retentativa absorvida pela próxima mensagem; quarentena após 3 falhas | 2.3, 3.6, 3.7 |
+| [ADR-0005](../decisions/ADR-0005-janela-de-historico.md) | Janela de 30 mensagens `customer`, escopo cliente, `agent` filtrado na API | 2.2, 3.3, 4.4, 6 (T5) |
 
 ---
 
@@ -17,37 +42,37 @@ Convenções:
 O modelo de dados se divide em duas trilhas que não compartilham armazenamento:
 
 - **Trilha online (operacional):** cada mensagem é persistida no DuckDB pelo Backend API, que pede a inferência ao módulo de ML e grava o resultado.
-- **Trilha offline (ML):** corpus sintético e snapshots exportados viram datasets rotulados, que geram versões de modelo. Tudo em arquivos, fora do DuckDB.
+- **Trilha offline (ML):** o corpus sintético vira dataset rotulado, que gera versões de modelo. Tudo em arquivos, fora do DuckDB.
 
 | # | Estágio | Componente | Entrada | Saída | Grão da saída |
 |---|---|---|---|---|---|
 | 1 | Ingestão | mood-api `POST /v1alpha1/ingest` | `IngestRequest` (HTTP) | linhas em `customers`, `conversations`, `messages` | mensagem |
-| 2 | Contexto de inferência | mood-api | `messages` | `InferRequest` | mensagem disparadora + janela de histórico |
+| 2 | Contexto de inferência | mood-api | `messages` | `InferRequest` | mensagem disparadora + 30 mensagens `customer` |
 | 3 | Inferência | mood-ml `POST /internal/v1/infer` | `InferRequest` | `InferResponse` | uma inferência |
 | 4 | Registro do humor | mood-api | `InferResponse` | linha em `mood_scores` ou `inference_failures` | uma inferência |
 | 5 | Consulta | mood-api `GET /v1alpha1/customer/<id>/mood` | `v_customer_mood_latest` | `MoodResponse` | cliente |
-| 6 | Treino (offline) | mood-ml `ingest/`, `transform/`, `train/` | corpus sintético, snapshot exportado | dataset rotulado, artefato de modelo + manifesto | exemplo de treino / versão de modelo |
+| 6 | Encerramento | mood-api `POST /v1alpha1/conversation/<id>/close` | `conversation_id` | `conversations` atualizada | conversa |
+| 7 | Treino (offline) | mood-ml `ingest/`, `transform/`, `train/` | corpus sintético | dataset rotulado, artefato de modelo + manifesto | exemplo de treino / versão de modelo |
 
 ```
-                    TRILHA ONLINE (DuckDB, escritor único = mood-api)
+                    TRILHA ONLINE (DuckDB, escritor único = mood-api)   [P1]
 
 chat-app ──IngestRequest──► mood-api ──► customers / conversations / messages
                                │
+                               │  só role=customer dispara inferência
                                ├──InferRequest──► mood-ml (infer) ──InferResponse──┐
-                               │                                                    │
+                               │   (30 msgs customer)                               │
                                ◄────────────────────────────────────────────────────┘
-                               ├──► mood_scores (append-only)  |  inference_failures
-                               │
+                               ├──► mood_scores (append-only) [P2]
+                               └──► inference_failures (erro ou quarentena) [P3]
+
 chat-app ◄──MoodResponse─── v_customer_mood_latest
 
                     TRILHA OFFLINE (arquivos em mood-ml/, sem acesso ao DuckDB)
 
-synthetic_conversations ──┐
-                          ├─► [T1..T4 em aberto] ─► training_dataset ─► train ─► models/<version>/
-snapshot exportado ───────┘                                                        (artefato + manifest)
+synthetic_conversations ─► [T1, T3] ─► training_dataset ─► train ─► models/<version>/
+  (+ generated_label = T4)                                          (artefato + manifest)
 ```
-
-A regra de arquitetura do [README](../README.md) governa o modelo: **só o mood-api escreve no DuckDB**. O mood-ml nunca lê nem escreve o arquivo `.duckdb`. Recebe dados por HTTP (online) ou por arquivo exportado (offline).
 
 ---
 
@@ -67,7 +92,22 @@ Contrato público definido no README. Os nomes dos campos são mantidos para nã
 | `customer_name` | string | não | — | `customers.display_name` (**planejado**, campo novo e opcional) |
 | `client_message_id` | string | não | único por `conversation_id` | `messages.client_message_id` (**planejado**, para idempotência) |
 
-Resposta: `200 {"status": "ok", "message_id": "<uuid>"}` quando a inferência é síncrona, ou `202` com o mesmo corpo quando for assíncrona. O `message_id` na resposta é **planejado**, para permitir correlacionar a mensagem com o humor calculado a partir dela.
+Respostas:
+
+| Status | Quando |
+|---|---|
+| `200 {"status": "ok", "message_id": "<uuid>"}` | Mensagem persistida, inferência síncrona concluída |
+| `202` (mesmo corpo) | Mensagem persistida, inferência assíncrona |
+| `400` | Payload inválido, ou `customer_id` diferente do dono da conversa |
+| `413` | Mensagem acima do tamanho máximo |
+| `422` | **Decidido (ADR-0003):** `role = 'agent'` para um `conversation_id` inexistente. O atendente responde a um atendimento, nunca o inicia |
+
+Regras de efeito, **decididas (ADR-0003 e ADR-0005)**:
+
+- `role = 'customer'` em conversa inexistente **cria** a conversa (`status = 'open'`).
+- `role = 'customer'` em conversa `closed` **reabre** a conversa (`status = 'open'`, `closed_at = null`) e é processada normalmente.
+- **Só `role = 'customer'` dispara inferência.** Mensagens `agent` são persistidas e nada mais.
+- Conversa em quarentena (ADR-0004) persiste a mensagem e grava `inference_failures` com `error_code = 'quarantined'`, sem chamar o mood-ml.
 
 ### 2.2 `POST /internal/v1/infer` — contrato mood-api → mood-ml
 
@@ -79,20 +119,24 @@ Contrato interno, não exposto ao frontend.
 |---|---|---|
 | `request_id` | string (UUID) | Gerado pela API; permite rastrear a falha até a mensagem |
 | `customer_id` | string | — |
-| `conversation_id` | string | — |
+| `conversation_id` | string | Conversa da mensagem disparadora |
 | `trigger_message_id` | string (UUID) | Mensagem que disparou a inferência (sempre `role = customer`) |
-| `history` | array de `HistoryMessage` | Janela de contexto, em ordem cronológica crescente, incluindo a mensagem disparadora como último item |
+| `history` | array de `HistoryMessage` | Janela de contexto (ver abaixo), ordem cronológica crescente, com a mensagem disparadora como último item. Tamanho entre 1 e 30 |
 
 `HistoryMessage`:
 
 | Campo | Tipo JSON | Descrição |
 |---|---|---|
 | `message_id` | string | — |
-| `role` | string | `customer` \| `agent` |
+| `role` | string | `customer` \| `agent`. No MVP sempre `customer` |
 | `text` | string | Texto como persistido; mascarado ou não, conforme T2 (em aberto) |
 | `sent_at` | string ISO-8601 UTC | — |
 
-> **Em aberto — janela de histórico (T5):** tamanho da janela (N mensagens, período, conversa inteira ou todas as conversas do cliente) e se mensagens `agent` entram como contexto. O contrato já transporta ambos os papéis; o modelo decide o que usar. A regra do README ("mensagens `agent` não entram no cálculo") passa a ser responsabilidade do mood-ml, e não um filtro na API.
+> **Decidido (ADR-0005) — janela de histórico (T5):** as **30 mensagens `customer` mais recentes do cliente**, com escopo de **cliente** e não de conversa: a janela atravessa `conversation_id`, inclusive conversas encerradas. Mensagens `agent` **não entram**, e o filtro é aplicado **na API**, ao montar o `InferRequest` — decisão tomada em favor de P5 (menos PII em trânsito), ao custo de acoplar a API a uma escolha de modelagem. O campo `role` permanece no contrato para permitir reativar contexto de atendente sem mudar o esquema.
+>
+> A janela é parte da especificação de features: por P4, mudar tamanho ou critério exige nova `model_version`, e `history_window` no manifesto deve bater com o comportamento da API (divergência impede subir o serviço).
+>
+> Cliente novo produz janela de um item. O modelo precisa se comportar razoavelmente com `len(history) == 1`.
 
 `InferResponse` (**planejado**):
 
@@ -102,13 +146,13 @@ Contrato interno, não exposto ao frontend.
 | `customer_id` | string | não | Eco do pedido |
 | `conversation_id` | string | não | Eco do pedido |
 | `trigger_message_id` | string | não | Eco do pedido |
-| `score` | number | não | Valor na escala declarada em `scale` |
-| `scale` | string | não | Identificador da escala (ver 3.5) |
-| `mood_label` | string | sim | Categoria discreta; `null` enquanto T6 não existir |
+| `score` | number | não | **Decidido (ADR-0001):** contínuo em `[-1.0, 1.0]` |
+| `scale` | string | não | **Decidido (ADR-0001):** sempre `'-1 to 1'` |
+| `mood_label` | string | sim | **Decidido (ADR-0001):** `null` no MVP; T6 fora de escopo |
 | `model_version` | string | não | Versão do modelo que produziu o score |
 | `computed_at` | string ISO-8601 UTC | não | Momento da inferência no mood-ml |
 
-Erro de inferência deve voltar como status HTTP de erro (`4xx`/`5xx`) com `{"error_code", "detail"}`. **Nunca** como um score neutro de fallback: um valor padrão seria indistinguível de um humor neutro real (ver 3.6).
+**P3:** erro de inferência volta como status HTTP `4xx`/`5xx` com `{"error_code", "detail"}`. **Nunca** como score neutro de fallback — um valor padrão seria indistinguível de um humor neutro real.
 
 ### 2.3 `GET /v1alpha1/customer/<id>/mood` — `MoodResponse`
 
@@ -116,19 +160,39 @@ Erro de inferência deve voltar como status HTTP de erro (`4xx`/`5xx`) com `{"er
 |---|---|---|---|
 | `customer_id` | string | não | `v_customer_mood_latest.customer_id` |
 | `score` | number | não | `.score` |
-| `scale` | string | não | `.scale` |
+| `scale` | string | não | `.scale` (sempre `'-1 to 1'`) |
 | `model_version` | string | não | `.model_version` |
 | `computed_at` | string ISO-8601 UTC | não | `.computed_at` |
 | `conversation_id` | string | não | `.conversation_id` (**planejado**, adição compatível) |
-| `mood_label` | string | sim | `.mood_label` (**planejado**, adição compatível) |
+| `mood_label` | string | sim | `.mood_label` (**planejado**, `null` no MVP) |
 
-`404` quando o cliente não tem nenhuma linha em `mood_scores`. Isso também vale para o cliente que tem mensagens cujas inferências todas falharam.
+**Decidido (ADR-0004) — comportamento durante falha:** a rota devolve sempre o **último score bem-sucedido**, mesmo que as inferências mais recentes estejam falhando ou a conversa esteja em quarentena. Nada de `503` e nada de valor neutro. `404` só quando o cliente não tem **nenhuma** linha em `mood_scores` — inclusive quando todas as suas inferências falharam.
+
+Esse comportamento é emergente: como `mood_scores` é append-only (P2) e falha não grava nada, a view já devolve o último válido sem código adicional.
+
+> **Limitação assumida:** o humor pode estar obsoleto sem que a resposta diga isso. O campo `computed_at` já permite ao frontend sinalizar obsolescência (ver 7); o limiar está em aberto.
+
+### 2.4 `POST /v1alpha1/conversation/<conversation_id>/close`
+
+**Decidido (ADR-0003).** Terceira rota pública, ausente do README original.
+
+| Status | Corpo | Quando |
+|---|---|---|
+| `200` | `{"conversation_id", "status": "closed", "closed_at"}` | Conversa encerrada |
+| `404` | — | `conversation_id` inexistente |
+
+**Idempotente:** fechar uma conversa já fechada devolve `200` com o `closed_at` **original**, que nunca é sobrescrito.
 
 ---
 
 ## 3. Camada 2 — Esquema operacional (DuckDB)
 
-Arquivo: `mood-api/data/mood.duckdb` ([connection.py](../mood-api/app/db/connection.py)). Único escritor: o processo do mood-api. Todas as datas são `TIMESTAMPTZ` gravadas em UTC.
+Arquivo: `mood-api/data/mood.duckdb` ([connection.py](../mood-api/app/db/connection.py)). Único escritor: o processo do mood-api (**P1**). Todas as datas são `TIMESTAMPTZ` gravadas em UTC.
+
+Duas naturezas de tabela convivem aqui, e a diferença é deliberada:
+
+- **Dimensões mutáveis** (`customers`, `conversations`): guardam estado atual, com `UPDATE`.
+- **Fatos imutáveis** (`messages`, `mood_scores`, `inference_failures`): append-only. P2 vale para `mood_scores`; as outras duas seguem a mesma disciplina por coerência.
 
 ```mermaid
 erDiagram
@@ -138,6 +202,7 @@ erDiagram
     messages ||--o{ mood_scores : "dispara"
     messages ||--o{ inference_failures : "dispara"
     conversations ||--o{ mood_scores : "contextualiza"
+    conversations ||--o{ inference_failures : "contextualiza"
     customers ||--o{ mood_scores : "tem humor"
 ```
 
@@ -147,14 +212,14 @@ Uma linha por cliente. Criada no primeiro `ingest` do cliente (upsert).
 
 | Coluna | Tipo | Nulo? | Restrição | Descrição |
 |---|---|---|---|---|
-| `customer_id` | VARCHAR | não | PK | Identificador recebido no ingest (ver seção 8 sobre pseudonimização) |
-| `display_name` | VARCHAR | sim | — | Nome exibido ao atendente. PII |
+| `customer_id` | VARCHAR | não | PK | Identificador recebido no ingest; pseudônimo por P5 (ver seção 8) |
+| `display_name` | VARCHAR | sim | — | Nome exibido ao atendente. PII: nunca sai do DuckDB |
 | `first_seen_at` | TIMESTAMPTZ | não | — | `received_at` da primeira mensagem |
 | `last_message_at` | TIMESTAMPTZ | não | — | `sent_at` da mensagem mais recente, atualizado a cada ingest |
 
 ### 3.2 `conversations`
 
-Uma linha por conversa. Um cliente pode ter várias conversas; uma conversa pertence a exatamente um cliente.
+Uma linha por conversa. Um cliente pode ter várias conversas; uma conversa pertence a exatamente um cliente. Dimensão **mutável**.
 
 | Coluna | Tipo | Nulo? | Restrição | Descrição |
 |---|---|---|---|---|
@@ -162,8 +227,23 @@ Uma linha por conversa. Um cliente pode ter várias conversas; uma conversa pert
 | `customer_id` | VARCHAR | não | FK → `customers` | Fixado na criação; ingest com outro `customer_id` para a mesma conversa é rejeitado com `400` |
 | `started_at` | TIMESTAMPTZ | não | — | `sent_at` da primeira mensagem |
 | `last_message_at` | TIMESTAMPTZ | não | — | `sent_at` da mensagem mais recente |
-| `status` | VARCHAR | não | `open` \| `closed` | Padrão `open`. **Em aberto:** quem e quando encerra (inatividade, ação do atendente) |
-| `closed_at` | TIMESTAMPTZ | sim | — | Preenchido quando `status = closed` |
+| `status` | VARCHAR | não | `open` \| `closed` | **Decidido (ADR-0003).** Padrão `open` |
+| `closed_at` | TIMESTAMPTZ | sim | — | Preenchido no encerramento; `null` enquanto `open` |
+
+Ciclo de vida, **decidido (ADR-0003)**:
+
+| Evento | Efeito |
+|---|---|
+| Primeiro `ingest` com `role = 'customer'` | Cria a conversa com `status = 'open'`, `closed_at = null` |
+| `ingest` com `role = 'agent'` em conversa inexistente | Rejeitado com `422`; nada é criado |
+| `POST .../close` | `status = 'closed'`, `closed_at = now()`. Repetido, preserva o `closed_at` original |
+| `ingest` com `role = 'customer'` em conversa `closed` | Reabre: `status = 'open'`, `closed_at = null`. A mensagem é persistida e dispara inferência |
+
+**Proibido:** criar conversa a partir de mensagem `agent`; sobrescrever `closed_at` em fechamento repetido.
+
+`status` **não** representa quarentena de inferência — são dimensões ortogonais, e uma conversa pode estar encerrada e em quarentena ao mesmo tempo (ver 3.6).
+
+> **Limitação assumida (ADR-0003):** a reabertura destrói o histórico de encerramentos. Uma conversa fechada e reaberta cinco vezes guarda só o último `closed_at`. Se a duração do atendimento virar métrica, a solução é uma tabela `conversation_events` append-only, com `status` derivado por view — fora do escopo do MVP.
 
 ### 3.3 `messages`
 
@@ -174,15 +254,20 @@ Uma linha por mensagem, dos dois papéis. Tabela **imutável**: não há `UPDATE
 | `message_id` | VARCHAR (UUID) | não | PK | Gerado pela API |
 | `conversation_id` | VARCHAR | não | FK → `conversations` | — |
 | `customer_id` | VARCHAR | não | FK → `customers` | Desnormalizado para consultas por cliente; sempre igual a `conversations.customer_id` |
-| `role` | VARCHAR | não | `customer` \| `agent` | — |
+| `role` | VARCHAR | não | `customer` \| `agent` | Só `customer` dispara inferência |
 | `text` | VARCHAR | não | — | Corpo da mensagem. Se é bruto ou mascarado depende de T2 (em aberto) |
 | `sent_at` | TIMESTAMPTZ | não | — | `timestamp` informado pelo cliente. Chave de ordenação |
 | `received_at` | TIMESTAMPTZ | não | padrão `now()` | Momento em que a API persistiu |
 | `client_message_id` | VARCHAR | sim | UNIQUE (`conversation_id`, `client_message_id`) | Idempotência de reenvio |
 
-Índice sugerido: (`conversation_id`, `sent_at`) para montar a janela de histórico do `InferRequest`.
+Índices, **decididos (ADR-0005)**:
 
-### 3.4 `mood_scores` — histórico append-only
+| Índice | Para quê |
+|---|---|
+| (`customer_id`, `role`, `sent_at`) | **Obrigatório.** Monta a janela de 30 mensagens `customer` do cliente. Sem ele, a consulta vira scan à medida que `messages` cresce |
+| (`conversation_id`, `sent_at`) | Listagem de mensagens da conversa no frontend |
+
+### 3.4 `mood_scores` — histórico append-only (P2)
 
 Uma linha por **inferência bem-sucedida**. Nunca é atualizada nem apagada: o humor atual é derivado (3.7), não armazenado.
 
@@ -191,44 +276,66 @@ Uma linha por **inferência bem-sucedida**. Nunca é atualizada nem apagada: o h
 | `mood_id` | VARCHAR (UUID) | não | PK | Gerado pela API |
 | `request_id` | VARCHAR (UUID) | não | UNIQUE | Correlaciona com o `InferRequest` |
 | `customer_id` | VARCHAR | não | FK → `customers` | — |
-| `conversation_id` | VARCHAR | não | FK → `conversations` | — |
-| `trigger_message_id` | VARCHAR | não | FK → `messages` | Mensagem de cliente que originou a inferência |
-| `score` | DOUBLE | não | dentro dos limites de `scale` | Valor contínuo |
-| `scale` | VARCHAR | não | valor de 3.5 | Escala em que `score` está expresso |
-| `mood_label` | VARCHAR | sim | — | Categoria discreta opcional (T6, em aberto) |
-| `model_version` | VARCHAR | não | — | Versão do modelo (manifesto em 4.4) |
+| `conversation_id` | VARCHAR | não | FK → `conversations` | Conversa da mensagem disparadora |
+| `trigger_message_id` | VARCHAR | não | FK → `messages` | Mensagem `customer` que originou a inferência |
+| `score` | DOUBLE | não | `BETWEEN -1.0 AND 1.0` | **Decidido (ADR-0001)** |
+| `scale` | VARCHAR | não | `'-1 to 1'` no MVP | Escala em que `score` está expresso |
+| `mood_label` | VARCHAR | sim | — | `null` no MVP (T6 fora de escopo) |
+| `model_version` | VARCHAR | não | ≠ `'untrained'` (P3) | Versão do modelo (manifesto em 4.4) |
 | `computed_at` | TIMESTAMPTZ | não | — | Momento da inferência, informado pelo mood-ml |
 | `persisted_at` | TIMESTAMPTZ | não | padrão `now()` | Momento da gravação na API |
 
 Uma mesma mensagem pode ter mais de uma linha, por exemplo em uma reinferência com outra `model_version`. Por isso a chave natural é (`trigger_message_id`, `model_version`), e não só a mensagem.
 
-### 3.5 Escala do humor — em aberto
+> **Limitação assumida (ADR-0004): `mood_scores` não é registro completo por mensagem.** Como a retentativa é absorvida pela mensagem seguinte, a mensagem que falhou nunca ganha linha própria — o `trigger_message_id` do sucesso posterior é o da mensagem nova. Qualquer análise de cobertura precisa cruzar `messages` com `mood_scores` **e** `inference_failures`.
 
-A escala **não é fixada** por este modelo. A estrutura suporta qualquer escala contínua, com uma categoria discreta opcional:
+### 3.5 Escala do humor — decidida (ADR-0001)
 
-- `score` é sempre `DOUBLE`.
-- `scale` declara em qual escala o `score` está. Valores já reconhecidos pelo frontend ([mood.ts](../chat-app/src/utils/mood.ts)): `'-1 to 1'` e `'0 to 1'`. Uma escala nova exige atualizar a normalização no frontend.
-- `mood_label` fica `null` até existir uma escala discreta. Quando existir, o domínio de valores deve ser declarado no manifesto do modelo (4.4), e não fixado no banco.
-- **Invariante:** todas as linhas com a mesma `model_version` usam a mesma `scale`. Trocar a escala exige uma nova versão de modelo.
-- A API valida `score` contra os limites da `scale` antes de gravar. Um valor fora dos limites vira `inference_failures` com `error_code = 'score_out_of_range'`.
+Escala **contínua `-1 to 1`**, fixada para todo o MVP:
+
+- `score` é `DOUBLE` em `[-1.0, 1.0]`, limites inclusivos.
+- Semântica: o **sinal** indica direção (negativo = insatisfeito, positivo = satisfeito), o **módulo** indica intensidade, **zero é neutro**.
+- `scale = '-1 to 1'` em `mood_scores`, no `InferResponse` e no manifesto do modelo. É o valor que [mood.ts](../chat-app/src/utils/mood.ts) já trata sem normalização.
+- `mood_label` permanece `null`: a transformação T6 (score → categoria) está fora do escopo do MVP, e o frontend continua mapeando score para emoji sozinho.
+- **Invariante:** todas as linhas com a mesma `model_version` usam a mesma `scale`. Por P2, trocar de escala não é `UPDATE`: exige treinar e publicar nova `model_version`, e as linhas antigas permanecem na escala que declararam.
+- A API valida o intervalo **antes** de gravar. Score fora de `[-1.0, 1.0]` vira `inference_failures` com `error_code = 'score_out_of_range'` — é esse limite que impede uma resposta corrompida do mood-ml de entrar como humor válido.
+
+**Consequência para o ML:** o problema é de **regressão**, não de classificação. `manifest.metrics` deve carregar MAE ou RMSE; acurácia não se aplica.
 
 ### 3.6 `inference_failures`
 
-Uma linha por inferência que não produziu score válido. Existe para que falhas não desapareçam em silêncio: sem ela, uma mensagem cuja inferência falhou é indistinguível de uma mensagem que nunca foi avaliada.
+Uma linha por inferência que não produziu score válido (**P3**). Existe para que falhas não desapareçam em silêncio: sem ela, uma mensagem cuja inferência falhou é indistinguível de uma mensagem que nunca foi avaliada.
 
 | Coluna | Tipo | Nulo? | Restrição | Descrição |
 |---|---|---|---|---|
 | `failure_id` | VARCHAR (UUID) | não | PK | — |
-| `request_id` | VARCHAR (UUID) | não | — | — |
+| `request_id` | VARCHAR (UUID) | não | — | Gerado mesmo quando o mood-ml não chega a ser chamado |
 | `trigger_message_id` | VARCHAR | não | FK → `messages` | — |
+| `conversation_id` | VARCHAR | não | FK → `conversations` | **Decidido (ADR-0004):** desnormalizado, para que a contagem de quarentena não exija JOIN com `messages` |
 | `model_version` | VARCHAR | sim | — | `null` se o mood-ml não chegou a responder |
-| `error_code` | VARCHAR | não | — | Ex.: `timeout`, `ml_unavailable`, `invalid_response`, `score_out_of_range` |
-| `detail` | VARCHAR | sim | — | Mensagem de erro, **sem** texto da conversa |
+| `error_code` | VARCHAR | não | domínio abaixo | — |
+| `detail` | VARCHAR | sim | sem PII (P5) | Mensagem de erro, **sem** texto da conversa |
 | `occurred_at` | TIMESTAMPTZ | não | padrão `now()` | — |
 
-> **Em aberto:** política de retentativa (reprocessar falhas em lote ou descartar). O modelo de dados permite as duas coisas: uma retentativa gera um novo `request_id` e, se tiver sucesso, uma linha em `mood_scores`.
+Domínio de `error_code`:
 
-### 3.7 Views derivadas
+| Valor | Significado | Conta para quarentena? |
+|---|---|---|
+| `timeout` | mood-ml não respondeu a tempo | sim |
+| `ml_unavailable` | Falha de conexão com o mood-ml | sim |
+| `invalid_response` | Resposta fora do contrato de 2.2 | sim |
+| `score_out_of_range` | `score` fora de `[-1.0, 1.0]` (ADR-0001) | sim |
+| `quarantined` | Inferência não tentada por quarentena ativa | **não** |
+
+**Decidido (ADR-0004) — retentativa e quarentena:**
+
+- **Sem job, fila ou agendador.** A retentativa é absorvida pela próxima mensagem do cliente: a mensagem que falhou já está em `messages` e entra na janela de histórico da inferência seguinte. Cada tentativa gera um `request_id` novo.
+- **Quarentena após 3 falhas consecutivas** por conversa, contadas desde a última inferência bem-sucedida. Um sucesso zera a contagem.
+- Em quarentena: mensagens continuam sendo **persistidas normalmente**, nenhuma inferência é tentada, e cada mensagem grava `error_code = 'quarantined'` para preservar a trilha.
+- O estado de quarentena é **derivado por consulta** (3.7), nunca armazenado — guardar um contador criaria uma segunda fonte da verdade, capaz de divergir de `inference_failures`.
+- Saída da quarentena é **manual** e está fora do escopo do MVP.
+
+### 3.7 Views e consultas derivadas
 
 **`v_customer_mood_latest`**: último humor por cliente. É a origem do `MoodResponse`.
 
@@ -244,18 +351,33 @@ SELECT * EXCLUDE (rn) FROM (
 
 **`v_conversation_mood_latest`**: mesma lógica, com `PARTITION BY conversation_id`. Atende o frontend, que mostra um emoji **por conversa**.
 
-> Com várias versões de modelo em produção ao mesmo tempo, "último" por `computed_at` pode alternar entre versões. **Em aberto:** filtrar as views por uma versão ativa, definida em configuração da API.
+**Quarentena (ADR-0004)**: falhas consecutivas da conversa desde a última inferência bem-sucedida. Roda a cada ingest de `customer`, antes de chamar o mood-ml; a partir de 3, a inferência não é tentada.
+
+```sql
+SELECT count(*)
+FROM inference_failures f
+WHERE f.conversation_id = ?
+  AND f.error_code <> 'quarantined'
+  AND f.occurred_at > coalesce(
+        (SELECT max(persisted_at) FROM mood_scores WHERE conversation_id = ?),
+        '-infinity'::TIMESTAMPTZ
+      );
+```
+
+> Esta é a versão já com `conversation_id` desnormalizado em `inference_failures`; sem a coluna, a mesma contagem exige JOIN com `messages`.
+
+> **Em aberto:** com várias versões de modelo ativas ao mesmo tempo, "último" por `computed_at` pode alternar entre versões. Filtrar as views por uma versão ativa definida em configuração da API continua em aberto.
 
 ---
 
 ## 4. Camada 3 — Artefatos de ML (arquivos em `mood-ml/`)
 
-O mood-ml não tem banco. Seus dados são arquivos versionados por identificador, fora do git (ver seção 8). Estrutura de diretórios planejada:
+O mood-ml não tem banco (**P1**). Seus dados são arquivos versionados por identificador, fora do git (**P5**, ver seção 8). Estrutura de diretórios planejada:
 
 ```
 mood-ml/data/
   raw/synthetic/<corpus_id>.jsonl        # 4.1
-  raw/snapshots/<snapshot_id>.parquet    # 4.2
+  raw/snapshots/<snapshot_id>.parquet    # 4.2 — pós-MVP
   labels/<label_set_id>.parquet          # 4.3
   datasets/<dataset_id>/                 # 4.3
     train.parquet  validation.parquet  test.parquet  dataset.json
@@ -267,55 +389,61 @@ mood-ml/models/<model_version>/          # 4.4
 
 ### 4.1 Corpus sintético — `raw/synthetic/<corpus_id>.jsonl`
 
-Produzido por `generate_synthetic_conversations` ([synthetic.py](../mood-ml/ingest/synthetic.py)). Uma linha JSON por **mensagem**, no mesmo esquema de `messages`, para que o pipeline de treino trate dados sintéticos e reais da mesma forma:
+Produzido por `generate_synthetic_conversations` ([synthetic.py](../mood-ml/ingest/synthetic.py)). **Decidido (ADR-0002):** é a única fonte de dados de treino do MVP. Uma linha JSON por **mensagem**, no mesmo esquema de `messages`, para que o pipeline trate dados sintéticos e reais da mesma forma:
 
 | Campo | Tipo | Nulo? | Descrição |
 |---|---|---|---|
 | `corpus_id` | string | não | Identificador da geração |
-| `conversation_id` | string | não | Prefixo `syn-` para nunca colidir com IDs reais |
+| `conversation_id` | string | não | Prefixo `syn-`, para nunca colidir com IDs reais |
 | `customer_id` | string | não | Prefixo `syn-` |
 | `message_id` | string | não | — |
 | `role` | string | não | `customer` \| `agent` |
 | `text` | string | não | — |
 | `sent_at` | string ISO-8601 UTC | não | — |
-| `persona` | string | sim | Perfil simulado do cliente. **Em aberto:** estratégia de geração |
-| `generated_label` | number | sim | Humor "verdadeiro" atribuído pelo gerador, quando houver |
+| `persona` | string | **não** | Perfil simulado do cliente, definido **antes** do texto |
+| `generated_label` | number | **não** em `role = 'customer'` | Humor verdadeiro em `[-1.0, 1.0]`. É o ground truth do MVP |
+
+O gerador define persona e trajetória emocional da conversa **antes** de escrever o texto: o rótulo nasce junto com o dado, e não é inferido depois. Mensagens `agent` sintéticas podem ter `generated_label` nulo, já que não são alvo de predição.
+
+> **Em aberto:** a estratégia de geração de personas e trajetórias, a ser fixada na spec do corpus sintético (fase F3). A qualidade do modelo fica limitada pela qualidade do gerador — investir em realismo das personas rende mais que investir no algoritmo.
 
 ### 4.2 Snapshot de dados reais — `raw/snapshots/<snapshot_id>.parquet`
 
-Exportação de `messages` (e opcionalmente de `mood_scores`) feita **pelo mood-api**, preservando a regra de escritor único. Tem o mesmo esquema de colunas de 3.3, mais `snapshot_id` e `exported_at`.
+**Pós-MVP.** Exportação de `messages` (e opcionalmente de `mood_scores`) feita **pelo mood-api**, preservando P1. Mesmo esquema de colunas de 3.3, mais `snapshot_id` e `exported_at`, e **sem** `display_name`, excluído por construção (P5).
 
-> **Em aberto:** mecanismo de exportação (`COPY ... TO` disparado por endpoint administrativo ou por job agendado), recorte temporal e se o texto sai já mascarado (T2).
+> **Em aberto:** mecanismo de exportação (`COPY ... TO` por endpoint administrativo ou job agendado), recorte temporal e se o texto sai já mascarado (T2).
 
 ### 4.3 Rótulos e dataset de treino
 
 **`labels/<label_set_id>.parquet`**: ground truth, separado dos dados brutos para permitir mais de uma fonte de rótulo sobre o mesmo corpus.
 
-| Campo | Tipo | Nulo? | Descrição |
+| Campo | Tipo | Nulo? | Valor no MVP (ADR-0002) |
 |---|---|---|---|
 | `label_set_id` | string | não | — |
-| `target_type` | string | não | `message` \| `conversation`. **Em aberto:** grão do rótulo |
-| `target_id` | string | não | `message_id` ou `conversation_id`, conforme `target_type` |
-| `label_score` | number | não | Na escala de `scale` |
-| `scale` | string | não | Mesma semântica de 3.5 |
-| `label_source` | string | não | `synthetic` \| `manual` \| `heuristic` \| `csat`. **Em aberto:** fonte oficial |
-| `annotator` | string | sim | Identificador pseudônimo, quando `manual` |
+| `target_type` | string | não | `message` |
+| `target_id` | string | não | `message_id` |
+| `label_score` | number | não | `generated_label`, em `[-1.0, 1.0]` |
+| `scale` | string | não | `'-1 to 1'` (ADR-0001) |
+| `label_source` | string | não | `synthetic`. Domínio completo: `synthetic` \| `manual` \| `heuristic` \| `csat` |
+| `annotator` | string | sim | `null` |
 | `labeled_at` | string ISO-8601 UTC | não | — |
 
-**`datasets/<dataset_id>/`**: saída de T3 + T4, entrada de `train_model` ([train.py](../mood-ml/train/train.py)). Uma linha por **exemplo** (grão = `target_type` do label set):
+Trocar a fonte de rótulo no futuro (`manual`, `csat`) **não exige mudança estrutural**: gera-se um novo `label_set_id` e um novo `dataset_id`.
+
+**`datasets/<dataset_id>/`**: saída de T3 aplicada sobre o corpus, com o rótulo de T4. Entrada de `train_model` ([train.py](../mood-ml/train/train.py)). Uma linha por **exemplo** (grão de mensagem, no MVP):
 
 | Campo | Tipo | Descrição |
 |---|---|---|
 | `example_id` | string | = `target_id` |
 | `customer_id` | string | Usado para o split |
-| `conversation_id` | string | Usado para o split |
+| `conversation_id` | string | Rastreabilidade |
 | `features` | em aberto | Vetor, colunas ou embedding. Definido por T3 e versionado por `feature_spec_version` |
 | `label_score` | number | Vindo do label set |
 | `split` | string | `train` \| `validation` \| `test` |
 
 `dataset.json` registra `dataset_id`, `source_ids` (corpus e snapshots), `label_set_id`, `feature_spec_version`, `split_strategy`, `row_counts` e `created_at`.
 
-> **Regra de split:** particionar por `customer_id`, e nunca por mensagem. Mensagens do mesmo cliente em treino e em teste vazam informação e inflam as métricas.
+> **Regra de split:** particionar por `customer_id`, e nunca por mensagem. Com ground truth sintético (ADR-0002) isso fica ainda mais crítico: personas repetidas entre treino e teste vazam o padrão do gerador, e a métrica passa a medir memorização.
 
 ### 4.4 Versão de modelo — `models/<model_version>/manifest.json`
 
@@ -326,27 +454,31 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
   "model_version": "mood-2026.09.0",
   "scale": "-1 to 1",
   "mood_labels": null,
-  "trained_at": "2026-09-14T00:00:00Z",
-  "dataset_id": "ds-2026-09-14-a",
+  "trained_at": "2026-09-17T00:00:00Z",
+  "dataset_id": "ds-2026-09-17-a",
+  "label_set_id": "ls-2026-09-17-syn",
   "feature_spec_version": "fs-0",
-  "history_window": null,
+  "history_window": 30,
   "algorithm": null,
-  "metrics": {},
+  "metrics": { "mae": null, "rmse": null },
   "code_commit": "<git sha>"
 }
 ```
 
-| Campo | Descrição |
-|---|---|
-| `model_version` | Identificador único e imutável. Nunca é reutilizado |
-| `scale` | Escala do `score` produzido (invariante de 3.5) |
-| `mood_labels` | Domínio de `mood_label` com os limites de score de cada categoria, ou `null` |
-| `dataset_id`, `feature_spec_version` | Rastreabilidade até os dados de treino |
-| `history_window` | Janela de contexto esperada na inferência (T5). `null` = em aberto |
-| `algorithm`, `metrics` | Em aberto até a arquitetura do modelo e a métrica de avaliação serem definidas |
-| `code_commit` | Commit do código que treinou o modelo |
+| Campo | Obrigatório | Descrição |
+|---|---|---|
+| `model_version` | sim | Identificador único e imutável. Nunca é reutilizado |
+| `scale` | sim | `'-1 to 1'` (ADR-0001). Invariante por versão |
+| `mood_labels` | sim | `null` no MVP |
+| `dataset_id`, `label_set_id`, `feature_spec_version` | sim | Rastreabilidade até os dados e as features de treino |
+| `history_window` | sim | `30` (ADR-0005). **Conferido no carregamento do modelo**: divergência em relação ao comportamento da API viola P4 e impede subir o serviço |
+| `metrics` | sim | Métricas de **regressão** (MAE, RMSE). Acurácia não se aplica (ADR-0001) |
+| `algorithm` | não | Em aberto até a arquitetura do modelo ser definida |
+| `code_commit` | sim | Commit do código que treinou o modelo |
 
-O valor placeholder `"untrained"` do scaffold ([predict.py](../mood-ml/infer/predict.py)) não deve chegar a `mood_scores` em produção.
+O placeholder `"untrained"` do scaffold ([predict.py](../mood-ml/infer/predict.py)) nunca pode chegar a `mood_scores` (P3).
+
+> **Limitação metodológica a declarar no TCC (ADR-0002):** treinado e avaliado sobre corpus sintético, o modelo aprende a função do gerador, não o humor humano. As métricas serão altas, e isso não é mérito do modelo. Nenhum número produzido sobre o corpus sintético é evidência de desempenho em conversas reais. A validação honesta — anotar manualmente cerca de cinquenta conversas reais e medir a correlação com o score do modelo — está fora do escopo do MVP, e até existir o modelo não deve ser apresentado como validado.
 
 ---
 
@@ -360,33 +492,36 @@ Customer (customer_id) ──1:N── Conversation (conversation_id) ──1:N�
                                                                           └── InferenceFailure (failure_id)
 ```
 
-- **Cliente ≠ conversa.** Diferente de um modelo "um contato = uma conversa", aqui um cliente pode ter várias conversas. O humor é consultado por cliente (`MoodResponse`) e exibido por conversa (`v_conversation_mood_latest`).
+- **Cliente ≠ conversa.** Um cliente pode ter várias conversas. O humor é consultado por cliente (`MoodResponse`), exibido por conversa (`v_conversation_mood_latest`) e **calculado por cliente**: a janela de contexto atravessa conversas, inclusive encerradas (ADR-0005).
+- **Encerrar conversa não limpa o contexto.** Fechar é evento de atendimento, não de dados (ADR-0003 × ADR-0005).
 - **Toda mensagem tem identidade própria** (`message_id`). A deduplicação de reenvio usa (`conversation_id`, `client_message_id`), quando informado.
-- **Humor é um evento, não um estado.** A chave natural de `mood_scores` é (`trigger_message_id`, `model_version`). O estado atual é sempre derivado por view.
-- **Somente mensagens `customer` disparam inferência.** Uma `agent` é persistida e pode compor o `history`, mas nunca aparece como `trigger_message_id`.
-- **IDs sintéticos têm o prefixo `syn-`**, o que garante que corpus sintético e dados reais possam ser unidos sem colisão.
-- **Online e offline se ligam por `model_version`.** Cada linha de `mood_scores` leva ao manifesto, ao dataset e aos rótulos que a produziram.
+- **Humor é um evento, não um estado** (P2). A chave natural de `mood_scores` é (`trigger_message_id`, `model_version`); o estado atual é sempre derivado por view.
+- **Só mensagens `customer` disparam inferência.** Uma `agent` é persistida, mas nunca aparece como `trigger_message_id` nem entra na janela de histórico do MVP.
+- **Nem toda mensagem `customer` tem score.** Falha e quarentena quebram a correspondência 1:1 com `mood_scores` (ADR-0004).
+- **IDs sintéticos têm o prefixo `syn-`**, o que garante que corpus sintético e dados reais possam coexistir sem colisão.
+- **Online e offline se ligam por `model_version`.** Cada linha de `mood_scores` leva ao manifesto, ao dataset, ao label set e à janela que a produziram.
 
 ---
 
-## 6. Transformações — em aberto
+## 6. Transformações
 
-Cada transformação é definida apenas pelo **contrato**: onde roda, o que recebe e o que devolve. A lógica será especificada e implementada depois. Enquanto não houver implementação, vale o comportamento da coluna "Placeholder".
+Cada transformação é definida pelo **contrato**: onde roda, o que recebe e o que devolve. T4, T5 e T6 foram fechadas por ADR; T1, T2 e T3 seguem em aberto e valem pelo comportamento da coluna "Placeholder / Regra" até serem especificadas.
 
-| ID | Transformação | Onde roda | Entrada | Saída | Placeholder | Decisões pendentes |
-|---|---|---|---|---|---|---|
-| T1 | Limpeza de texto | mood-ml `transform/clean.py` (`clean_message`) | `text: str` | `text: str` | `text.strip()` | Remoção de mensagens automáticas e texto padrão, normalização (caixa, acentos, emojis), mensagens vazias após a limpeza |
-| T2 | Mascaramento de PII | **em aberto**: antes de persistir (mood-api) ou só no ML | `text: str` | `text: str` com marcadores | nenhum | Local de execução, tipos de PII cobertos (CPF, telefone, e-mail, nomes), formato dos marcadores |
-| T3 | Extração de features | mood-ml `transform/clean.py` (`extract_features`) | lista de `HistoryMessage` | `features` (formato em aberto) | `NotImplementedError` | Features clássicas ou embeddings; o formato define `datasets/*.features` e `feature_spec_version` |
-| T4 | Rotulagem | mood-ml (offline) | mensagens ou conversas | linhas de `labels` | `generated_label` do corpus sintético | Grão (`message` ou `conversation`), fonte oficial do rótulo, protocolo de anotação |
-| T5 | Janela de contexto | mood-api (monta) + mood-ml (consome) | `messages` do cliente | `InferRequest.history` | só a mensagem disparadora | Tamanho da janela, inclusão de mensagens `agent`, histórico entre conversas |
-| T6 | Score → categoria | mood-ml (`infer`) | `score`, `scale` | `mood_label` | `null` | Número de categorias e limites. Hoje o frontend faz esse mapeamento sozinho ([mood.ts](../chat-app/src/utils/mood.ts)) |
+| ID | Transformação | Status | Onde roda | Entrada → Saída | Placeholder / Regra |
+|---|---|---|---|---|---|
+| T1 | Limpeza de texto | **em aberto** | mood-ml `transform/clean.py` (`clean_message`) | `text: str` → `text: str` | `text.strip()`. Pendente: remoção de mensagens automáticas, normalização (caixa, acentos, emojis), texto vazio após limpeza |
+| T2 | Mascaramento de PII | **em aberto** | indefinido: antes de persistir (mood-api) ou só no ML | `text: str` → `text` com marcadores | nenhum. Pendente: local de execução, tipos cobertos (CPF, telefone, e-mail, nomes), formato dos marcadores |
+| T3 | Extração de features | **em aberto** | mood-ml `transform/clean.py` (`extract_features`) | lista de `HistoryMessage` → `features` | `NotImplementedError`. Pendente: features clássicas ou embeddings; o formato define `datasets/*.features` e `feature_spec_version` |
+| T4 | Rotulagem | **decidida (ADR-0002)** | mood-ml, no gerador sintético | persona + trajetória → `generated_label` | `label_source = 'synthetic'`, `target_type = 'message'`, escala `-1 to 1`. O rótulo nasce com o dado |
+| T5 | Janela de contexto | **decidida (ADR-0005)** | mood-api (monta) → mood-ml (consome) | `messages` do cliente → `InferRequest.history` | 30 mensagens `customer` mais recentes do **cliente**, ordem crescente, `agent` filtrado na API |
+| T6 | Score → categoria | **fora do escopo (ADR-0001)** | — | `score` → `mood_label` | `mood_label = null`. O frontend faz o mapeamento para emoji ([mood.ts](../chat-app/src/utils/mood.ts)) |
 
 Invariantes que qualquer implementação futura deve respeitar:
 
-1. T1 e T3 aplicados no treino e na inferência são **o mesmo código na mesma versão**. `feature_spec_version` no manifesto garante isso.
-2. Nenhuma transformação altera linhas já gravadas em `messages` ou `mood_scores`. Um reprocessamento gera linhas novas.
-3. Uma transformação que falha em uma mensagem gera `inference_failures` e nunca produz um valor padrão.
+1. **P4:** T1 e T3 aplicados no treino e na inferência são o mesmo código, na mesma versão, importado de um único módulo. `feature_spec_version` e `history_window` no manifesto declaram o vínculo e são conferidos ao carregar o modelo.
+2. **P2:** nenhuma transformação altera linhas já gravadas em `messages` ou `mood_scores`. Reprocessamento gera linhas novas.
+3. **P3:** transformação que falha gera `inference_failures` e nunca produz valor padrão.
+4. **ADR-0005:** mudar o tamanho ou o critério da janela exige nova `model_version` — a janela é especificação de features, não parâmetro operacional.
 
 ---
 
@@ -396,47 +531,75 @@ O [chat-app](../chat-app/src/App.tsx) depende destes campos:
 
 | Uso no frontend | Campo de origem |
 |---|---|
-| Emoji e rótulo de humor | `MoodResponse.score`, `MoodResponse.scale` |
+| Emoji e rótulo de humor | `MoodResponse.score`, `MoodResponse.scale` (sempre `'-1 to 1'`) |
+| Barra de humor | mesmo par, normalizado pela mesma função que produz o emoji |
 | Tag de versão do modelo | `MoodResponse.model_version` |
+| Indicador de humor obsoleto | `MoodResponse.computed_at` (ADR-0004) |
 | Associação do humor à conversa | `MoodResponse.customer_id` (planejado: `conversation_id`) |
+| Ativos × histórico | `conversations.status`, `closed_at` (ADR-0003) |
+| Encerrar atendimento | `POST /v1alpha1/conversation/<id>/close` (ADR-0003) |
 | Lista de conversas: `id`, `customerId`, `customerName`, `lastSeen` | `conversations.conversation_id`, `customer_id`, `customers.display_name`, `conversations.last_message_at` |
 | Mensagens: `id`, `role`, `text`, `time` | `messages.message_id`, `role`, `text`, `sent_at` |
 
 Renomear ou mudar o tipo de `score`, `scale` ou `model_version` quebra o frontend.
 
-> **Em aberto:** as rotas de leitura de conversas e mensagens (hoje os dados são mockados em `App.tsx`) e o mecanismo de atualização do humor (polling, SSE ou WebSocket). O esquema de 3.1–3.3 já atende essas rotas sem alterações.
+**Indicador de obsolescência (ADR-0004):** como a API devolve o último humor válido mesmo durante falhas, o frontend deve derivar de `computed_at` um sinal visual quando o score passar de um limiar de idade. Não altera o contrato, apenas usa um campo existente. O limiar está em aberto.
+
+> **Em aberto:** rotas de leitura de conversas e mensagens (hoje mockadas em `App.tsx`) e mecanismo de atualização do humor (polling, SSE ou WebSocket). O esquema de 3.1–3.3 já atende essas rotas sem alterações.
 
 ---
 
-## 8. Tratamento de PII e armazenamento
+## 8. Tratamento de PII e armazenamento (P5)
 
-| Dado | Onde aparece | Tratamento planejado |
+| Dado | Onde aparece | Tratamento |
 |---|---|---|
-| `customer_id` | todas as tabelas, artefatos de ML | Deve ser um identificador **pseudônimo** vindo do sistema de origem, e nunca telefone ou e-mail em claro. Se a origem só tiver o telefone, a API guarda um hash com segredo (HMAC). **Em aberto** |
-| `display_name` | `customers` | PII. Fica só no DuckDB e **nunca** sai em snapshots ou datasets |
-| `text` | `messages`, snapshots, datasets | Pode conter CPF, telefone, e-mail etc. Mascaramento em T2 (em aberto) |
-| `inference_failures.detail` | DuckDB | Não pode conter trechos de mensagem |
-| `annotator` | `labels` | Pseudônimo |
+| `customer_id` | todas as tabelas, artefatos de ML | Sempre **pseudônimo**, nunca telefone ou e-mail em claro. Se a origem só tiver telefone, a API guarda hash com segredo (HMAC). **Em aberto:** o mecanismo |
+| `display_name` | `customers` | PII. Só no DuckDB; excluído por construção de snapshots e datasets |
+| `text` | `messages`, snapshots, datasets | Pode conter CPF, telefone, e-mail. Mascaramento em T2 (em aberto) |
+| `text` de `agent` | `messages` | Não trafega no `InferRequest`: a janela só leva mensagens `customer` (ADR-0005), o que reduz PII em trânsito |
+| `inference_failures.detail` | DuckDB | Nunca contém trechos de mensagem. Logs de erro carregam `message_id`, nunca `text` |
+| `annotator` | `labels` | Pseudônimo. `null` no MVP |
+| Corpus sintético | `raw/synthetic/` | Sem PII por construção — os artefatos de ML do MVP nascem em conformidade com P5 |
 
-Armazenamento fora do git: `mood-api/data/`, `mood-ml/data/` e `mood-ml/models/` devem estar no [.gitignore](../.gitignore).
+Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data/` e `mood-ml/models/` devem estar no [.gitignore](../.gitignore).
 
 > **Em aberto (README, "Ética e Privacidade"):** base legal para uso de dados reais, política de retenção (prazo de expurgo de `messages` e snapshots) e se `mood_scores` sobrevive ao expurgo do texto que o originou.
 
 ---
 
-## 9. Decisões em aberto que afetam o modelo
+## 9. Estado das decisões
 
-| Decisão | Estruturas afetadas | Estado atual no modelo |
+### 9.1 Fechadas
+
+| Decisão | ADR | Como está no modelo |
 |---|---|---|
-| Escala do humor | `score`, `scale`, `mood_label`, `manifest.mood_labels` | Estrutura genérica; nenhuma escala fixada |
-| Grão do rótulo | `labels.target_type`, `datasets` | Suporta `message` e `conversation` |
-| Janela de histórico (T5) | `InferRequest.history`, `manifest.history_window` | Contrato transporta a janela; tamanho indefinido |
+| Escala do humor | [0001](../decisions/ADR-0001-escala-do-humor.md) | Contínua `-1 to 1`, limites inclusivos, `mood_label` nulo |
+| Métrica de avaliação | [0001](../decisions/ADR-0001-escala-do-humor.md) | Regressão: MAE/RMSE em `manifest.metrics` |
+| Ground truth | [0002](../decisions/ADR-0002-origem-do-ground-truth.md) | `generated_label` sintético, `label_source = 'synthetic'` |
+| Grão do rótulo | [0002](../decisions/ADR-0002-origem-do-ground-truth.md) | `target_type = 'message'` |
+| Ciclo de vida da conversa | [0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) | Abertura por `customer`, fechamento manual idempotente, reabertura por `customer` |
+| Retentativa de falhas | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Absorvida pela próxima mensagem; sem job nem fila |
+| Comportamento durante falha | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Último score válido; `404` só sem nenhum score |
+| Quarentena | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | 3 falhas consecutivas por conversa, estado derivado por consulta |
+| Janela de histórico (T5) | [0005](../decisions/ADR-0005-janela-de-historico.md) | 30 mensagens `customer` do cliente, `agent` filtrado na API |
+
+### 9.2 Em aberto
+
+| Decisão | Estruturas afetadas | Estado atual |
+|---|---|---|
+| Regras de limpeza (T1) | `messages.text` no pipeline | Só `strip()` |
 | Local do mascaramento (T2) | `messages.text`, snapshots | Indefinido; ver seção 8 |
+| Formato de `features` (T3) | `datasets/*`, `feature_spec_version` | Indefinido |
+| Estratégia de geração de personas | `corpus.persona`, qualidade do modelo | Spec da fase F3 |
+| Pseudonimização de `customer_id` | `customers`, todos os artefatos | Mecanismo (HMAC?) indefinido |
 | Versão ativa do modelo | `v_*_mood_latest` | Views não filtram por versão |
-| Encerramento de conversa | `conversations.status`, `closed_at` | Colunas existem; regra indefinida |
-| Inferência síncrona ou assíncrona | resposta `200`/`202` do ingest | Ambos previstos; `inference_failures` cobre falhas nos dois modos |
-| Retentativa de falhas | `inference_failures` | Permitida pelo modelo; política indefinida |
-| Formato de `features` | `datasets/*` | Indefinido |
+| Saída da quarentena | `inference_failures` | Manual, fora do escopo do MVP |
+| Limiar de obsolescência do humor | frontend, via `computed_at` | Indefinido |
+| Limite de 3 falhas configurável por ambiente | política de quarentena | Constante por ora |
+| Inferência síncrona ou assíncrona | resposta `200`/`202` do ingest | Ambas previstas |
+| Tamanho máximo de mensagem | `413` no ingest | Indefinido |
+| Ponderação por recência na janela | T3 | Mitigação futura do contexto que não expira |
+| Exportação de snapshots | `raw/snapshots/` | Pós-MVP |
 
 ---
 
@@ -444,12 +607,18 @@ Armazenamento fora do git: `mood-api/data/`, `mood-ml/data/` e `mood-ml/models/`
 
 | # | Scaffold atual | Planejado | Arquivo |
 |---|---|---|---|
-| 1 | Não há tabelas `customers` e `conversations` | Tabelas 3.1 e 3.2, com FKs | [connection.py](../mood-api/app/db/connection.py) |
+| 1 | Não há tabelas `customers` e `conversations` | Tabelas 3.1 e 3.2, com FKs e o ciclo de vida do ADR-0003 | [connection.py](../mood-api/app/db/connection.py) |
 | 2 | `messages` com colunas `id`, `message`, `timestamp` | `message_id`, `text`, `sent_at`, mais `received_at` e `client_message_id` | [connection.py](../mood-api/app/db/connection.py) |
 | 3 | `TIMESTAMP` sem timezone | `TIMESTAMPTZ` em UTC | [connection.py](../mood-api/app/db/connection.py) |
-| 4 | `mood_scores` com PK `customer_id`, que sobrescreve o humor anterior | Append-only com `mood_id` + views de humor atual | [connection.py](../mood-api/app/db/connection.py), [routes.py](../mood-api/app/api/routes.py) |
-| 5 | Não há registro de falhas de inferência | Tabela `inference_failures` | — |
-| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `trigger_message_id`, `history` | [predict.py](../mood-ml/infer/predict.py) |
-| 7 | `InferResponse` não ecoa conversa, mensagem nem pedido; placeholder `score=0.0`, `scale="neutral"` | Ecos + `mood_label`; erro via HTTP, nunca score padrão | [predict.py](../mood-ml/infer/predict.py) |
-| 8 | Mocks do frontend usam `scale` `'0 to 1'` e `'-1 to 1'`, mas a barra de humor sempre assume `-1..1` | Barra normalizada pela mesma função de `mood.ts` | [App.tsx](../chat-app/src/App.tsx) |
+| 4 | `mood_scores` com PK `customer_id`, que sobrescreve o humor anterior | Append-only com `mood_id` + views de humor atual (P2) | [connection.py](../mood-api/app/db/connection.py), [routes.py](../mood-api/app/api/routes.py) |
+| 5 | Não há registro de falhas nem quarentena | `inference_failures` com `conversation_id` e consulta de quarentena (P3, ADR-0004) | — |
+| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `trigger_message_id`, `history` de até 30 mensagens `customer` (ADR-0005) | [predict.py](../mood-ml/infer/predict.py) |
+| 7 | `InferResponse` não ecoa conversa, mensagem nem pedido; placeholder `score=0.0`, `scale="neutral"` | Ecos + `scale = '-1 to 1'`; erro via HTTP, nunca score padrão (P3, ADR-0001) | [predict.py](../mood-ml/infer/predict.py) |
+| 8 | Mocks do frontend usam `'0 to 1'` e `'-1 to 1'`, e a barra sempre assume `-1..1` | Escala única `-1 to 1`; barra normalizada pela mesma função do emoji | [App.tsx](../chat-app/src/App.tsx), [api.ts](../chat-app/src/services/api.ts) |
 | 9 | Resposta do ingest não devolve `message_id` | `{"status", "message_id"}` | [routes.py](../mood-api/app/api/routes.py) |
+| 10 | `ingest` não distingue papéis: tudo é persistido e nada dispara inferência | `agent` em conversa inexistente → `422`; só `customer` dispara inferência (ADR-0003) | [routes.py](../mood-api/app/api/routes.py) |
+| 11 | Não existe rota de encerramento | `POST /v1alpha1/conversation/<id>/close`, idempotente (ADR-0003) | [routes.py](../mood-api/app/api/routes.py), [README](../README.md) |
+| 12 | Nenhum índice declarado | `(customer_id, role, sent_at)` obrigatório para montar a janela (ADR-0005) | [connection.py](../mood-api/app/db/connection.py) |
+| 13 | `clean_message` e `extract_features` vivem em `transform/`, sem vínculo com o treino | Módulo único importado pelo treino e pela inferência, com `feature_spec_version` conferido no load (P4) | [clean.py](../mood-ml/transform/clean.py), [predict.py](../mood-ml/infer/predict.py) |
+
+> O README ainda descreve duas rotas públicas e mensagens `agent` filtradas no cálculo de humor. Os dois pontos mudaram (ADR-0003 e ADR-0005) e o README precisa ser atualizado.
