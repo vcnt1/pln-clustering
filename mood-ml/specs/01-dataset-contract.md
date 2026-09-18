@@ -2,7 +2,7 @@
 
 **Status:** Aceita · **Versão do contrato:** `dc-1` · **Data:** 2026-09-18
 **Especializa:** [data-model.md §4.1](../../data-structure/data-model.md). Onde este documento for mais restrito, ele prevalece para corpora `dc-1`.
-**Depende de:** ADR-001, ADR-002, ADR-003 ([00-decisoes.md](00-decisoes.md))
+**Depende de:** ADR-001, ADR-002 ([00-decisoes.md](00-decisoes.md)); [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md)
 **Consumido por:** `ingest/` (validação), `labels/` (T4)
 
 ---
@@ -67,7 +67,7 @@ Formato: **QUANDO** condição, o validador **DEVE** ação. Cada requisito vira
 - **DC-R09** O corpus DEVE ter ≥ 150 clientes, ≥ 300 conversas e ≥ 2000 mensagens `customer`.
 - **DC-R10** Cada nível de rótulo DEVE representar ≥ 10% das mensagens `customer`.
 - **DC-R11** O corpus DEVE ter ≥ 4 personas, cada uma com ≥ 10% dos clientes.
-- **DC-R12** Cada mensagem `customer` DEVE ter o rótulo inferível pelo próprio texto (ADR-003). É verificado por amostragem manual de 50 mensagens, e não automaticamente.
+- **DC-R12** Cada mensagem `customer` DEVE ter o rótulo inferível pelo próprio texto, porque o alvo é o humor da mensagem disparadora (ADR-0008). É verificado por amostragem manual de 50 mensagens, e não automaticamente.
 
 **Realismo e privacidade**
 - **DC-R13** O corpus NÃO DEVE conter dados pessoais reais.

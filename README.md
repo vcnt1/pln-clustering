@@ -108,8 +108,8 @@ devolve o de uma só, o emoji aparece apenas na conversa indicada por
 1. **Ingest**: inicialmente, dados sintéticos de conversas de clientes para
    bootstrap do treino; em produção, o fluxo de mensagens recebido via
    `POST /v1alpha1/ingest`.
-2. **Transform**: limpeza e extração de features a partir do texto das
-   mensagens e do histórico do cliente.
+2. **Transform**: limpeza e extração de features a partir da mensagem do
+   cliente e das mensagens anteriores da mesma conversa.
 3. **Train**: treino do modelo sobre o corpus sintético (e, depois, dados
    reais) para prever a temperatura de humor.
 4. **Infer**: a cada nova mensagem do cliente, calcula em tempo real a
@@ -133,14 +133,15 @@ Cada uma tem um ADR em `decisions/`, e o esquema resultante está em
   encerramento de conversa.
 - **Grão do humor e janela de contexto** (ADR-0007): humor por conversa,
   calculado sobre as últimas 30 mensagens `customer` daquela conversa.
+- **Arquitetura do modelo** (ADR-0008): regressão com Ridge sobre dois blocos
+  (mensagem disparadora e contexto da conversa). A abordagem A (TF-IDF) é
+  implementada primeiro, e a C (embeddings pré-treinados congelados) depois,
+  para comparação sobre o mesmo dataset.
 
 ## Decisões em Aberto
 
 - **Geração de dados sintéticos**: estratégia para simular perfis de clientes
   e conversas plausíveis para o treino inicial.
-- **Arquitetura do modelo**: features clássicas + classificador/regressor vs.
-  embeddings de texto + modelo; trade-off de custo/latência para inferência
-  em tempo real. Como a escala é contínua, o problema é de regressão.
 - **Atualização do modelo**: re-treino periódico vs. atualização incremental
   por cliente conforme novas mensagens chegam.
 - **Atualização do humor no frontend**: polling, SSE ou WebSocket — decide
@@ -154,9 +155,9 @@ Cada uma tem um ADR em `decisions/`, e o esquema resultante está em
 Item obrigatório antes de iniciar o treino do modelo, ainda em aberto:
 
 - **Orçamento de latência**: meta de tempo de resposta por mensagem (ex.:
-  p95 abaixo de um limite definido), que orienta a escolha entre features
-  clássicas e embeddings. A janela de 30 mensagens dá um teto fixo ao custo
-  de cada inferência.
+  p95 abaixo de um limite definido), que orienta a escolha da versão ativa
+  entre as abordagens A (TF-IDF) e C (embeddings) da ADR-0008. A janela de 30
+  mensagens dá um teto fixo ao custo de cada inferência.
 
 ## Ética e Privacidade
 

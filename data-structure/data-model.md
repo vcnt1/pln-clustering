@@ -34,6 +34,7 @@ ADRs vigentes:
 | [ADR-0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Retentativa absorvida pela próxima mensagem; quarentena após 3 falhas | 2.3, 3.6, 3.7 |
 | [ADR-0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Duas rotas públicas; encerramento de conversa fora do MVP | 2.1, 3.2, 7 |
 | [ADR-0007](../decisions/ADR-0007-humor-por-conversa.md) | Humor pertence à conversa; janela de 30 mensagens `customer` **da conversa** | 2.2, 2.3, 3.3, 3.4, 3.7, 4.4, 6 (T5) |
+| [ADR-0008](../decisions/ADR-0008-abordagens-de-modelo.md) | T3 em dois blocos (disparadora + contexto); abordagem A (TF-IDF + Ridge) primeiro, C (embeddings congelados + Ridge) depois | 4.3, 4.4, 6 (T3), 9 |
 
 Substituídos, mantidos apenas como registro histórico: [ADR-0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) (ciclo de vida com encerramento) por ADR-0006, e [ADR-0005](../decisions/ADR-0005-janela-de-historico.md) (janela com escopo de cliente) por ADR-0007.
 
@@ -395,7 +396,7 @@ mood-ml/models/<model_version>/          # 4.4
 
 ### 4.1 Corpus sintético — `raw/synthetic/<corpus_id>.jsonl`
 
-Produzido por `generate_synthetic_conversations` ([synthetic.py](../mood-ml/ingest/synthetic.py)). **Decidido (ADR-0002):** é a única fonte de dados de treino do MVP. Uma linha JSON por **mensagem**, no mesmo esquema de `messages`, para que o pipeline trate dados sintéticos e reais da mesma forma:
+Chega pronto e é validado contra o contrato `dc-1` ([01-dataset-contract.md](../mood-ml/specs/01-dataset-contract.md)) pelo `ingest/validate.py`. O gerador [synthetic.py](../mood-ml/ingest/synthetic.py) está deprecado. **Decidido (ADR-0002):** é a única fonte de dados de treino do MVP. Uma linha JSON por **mensagem**, no mesmo esquema de `messages`, para que o pipeline trate dados sintéticos e reais da mesma forma:
 
 | Campo | Tipo | Nulo? | Descrição |
 |---|---|---|---|
@@ -443,11 +444,15 @@ Trocar a fonte de rótulo no futuro (`manual`, `csat`) **não exige mudança est
 | `example_id` | string | = `target_id` |
 | `customer_id` | string | Usado para o split |
 | `conversation_id` | string | Rastreabilidade |
-| `features` | em aberto | Vetor, colunas ou embedding. Definido por T3 e versionado por `feature_spec_version` |
+| `persona` | string | Do corpus. Sustenta as métricas por persona (análise de viés) |
+| `text_clean` | string | Bloco **texto** de T3: mensagem disparadora após T1 + T2 (ADR-0008) |
+| `context_clean` | lista de string | Bloco **contexto** de T3: até 29 mensagens `customer` anteriores da conversa, após T1 + T2, em ordem crescente. Lista vazia no início da conversa (ADR-0008) |
 | `label_score` | number | Vindo do label set |
 | `split` | string | `train` \| `validation` \| `test` |
 
 `dataset.json` registra `dataset_id`, `source_ids` (corpus e snapshots), `label_set_id`, `feature_spec_version`, `split_strategy`, `row_counts` e `created_at`.
+
+> **Decidido (ADR-0008):** `datasets/*` guarda **texto**, nunca vetores. A vetorização vive dentro do artefato do modelo, e por isso as abordagens A e C treinam sobre o mesmo `dataset_id`. No treino, o `history` de cada exemplo é reconstruído do corpus com a mesma regra da API (T5) e passa pela mesma `extract_features` usada na inferência.
 
 > **Regra de split:** particionar por `customer_id`, e nunca por mensagem. Com ground truth sintético (ADR-0002) isso fica ainda mais crítico: personas repetidas entre treino e teste vazam o padrão do gerador, e a métrica passa a medir memorização.
 
@@ -466,8 +471,8 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
   "feature_spec_version": "fs-0",
   "history_window": 30,
   "history_scope": "conversation",
-  "algorithm": null,
-  "metrics": { "mae": null, "rmse": null },
+  "algorithm": "tfidf-ridge",
+  "metrics": { "mae": null, "rmse": null, "spearman": null },
   "code_commit": "<git sha>"
 }
 ```
@@ -479,8 +484,8 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
 | `mood_labels` | sim | `null` no MVP |
 | `dataset_id`, `label_set_id`, `feature_spec_version` | sim | Rastreabilidade até os dados e as features de treino |
 | `history_window`, `history_scope` | sim | `30` e `"conversation"` (ADR-0007). **Conferidos no carregamento do modelo**: divergência em relação ao comportamento da API viola P4 e impede subir o serviço |
-| `metrics` | sim | Métricas de **regressão** (MAE, RMSE). Acurácia não se aplica (ADR-0001) |
-| `algorithm` | não | Em aberto até a arquitetura do modelo ser definida |
+| `metrics` | sim | Métricas de **regressão** (MAE, RMSE, Spearman). Acurácia não se aplica (ADR-0001) |
+| `algorithm` | sim | `"tfidf-ridge"` (abordagem A) ou `"embeddings-ridge"` (abordagem C), conforme ADR-0008. Identifica a vetorização, que vive dentro do artefato |
 | `code_commit` | sim | Commit do código que treinou o modelo |
 
 O placeholder `"untrained"` do scaffold ([predict.py](../mood-ml/infer/predict.py)) nunca pode chegar a `mood_scores` (P3).
@@ -514,13 +519,13 @@ Customer (customer_id) ──1:N── Conversation (conversation_id) ──1:N�
 
 ## 6. Transformações
 
-Cada transformação é definida pelo **contrato**: onde roda, o que recebe e o que devolve. T4, T5 e T6 foram fechadas por ADR; T1, T2 e T3 seguem em aberto e valem pelo comportamento da coluna "Placeholder / Regra" até serem especificadas.
+Cada transformação é definida pelo **contrato**: onde roda, o que recebe e o que devolve. T3, T4, T5 e T6 foram fechadas por ADR; T1 e T2 seguem em aberto e valem pelo comportamento da coluna "Placeholder / Regra" até serem especificadas.
 
 | ID | Transformação | Status | Onde roda | Entrada → Saída | Placeholder / Regra |
 |---|---|---|---|---|---|
 | T1 | Limpeza de texto | **em aberto** | mood-ml `transform/clean.py` (`clean_message`) | `text: str` → `text: str` | `text.strip()`. Pendente: remoção de mensagens automáticas, normalização (caixa, acentos, emojis), texto vazio após limpeza |
 | T2 | Mascaramento de PII | **em aberto** | indefinido: antes de persistir (mood-api) ou só no ML | `text: str` → `text` com marcadores | nenhum. Pendente: local de execução, tipos cobertos (CPF, telefone, e-mail, nomes), formato dos marcadores |
-| T3 | Extração de features | **em aberto** | mood-ml `transform/clean.py` (`extract_features`) | lista de `HistoryMessage` → `features` | `NotImplementedError`. Pendente: features clássicas ou embeddings; o formato define `datasets/*.features` e `feature_spec_version` |
+| T3 | Extração de features | **decidida (ADR-0008)** | mood-ml `transform/features.py` (`extract_features`) | lista de `HistoryMessage` → `text_clean` + `context_clean` | T1 + T2 em cada item. `text_clean` = disparadora; `context_clean` = itens anteriores (até 29). A vetorização (TF-IDF na abordagem A, embeddings na C) vive no artefato do modelo |
 | T4 | Rotulagem | **decidida (ADR-0002)** | mood-ml, no gerador sintético | persona + trajetória → `generated_label` | `label_source = 'synthetic'`, `target_type = 'message'`, escala `-1 to 1`. O rótulo nasce com o dado |
 | T5 | Janela de contexto | **decidida (ADR-0007)** | mood-api (monta) → mood-ml (consome) | `messages` da conversa → `InferRequest.history` | 30 mensagens `customer` mais recentes da **conversa**, ordem crescente, `agent` filtrado na API |
 | T6 | Score → categoria | **fora do escopo (ADR-0001)** | — | `score` → `mood_label` | `mood_label = null`. O frontend faz o mapeamento para emoji ([mood.ts](../chat-app/src/utils/mood.ts)) |
@@ -598,6 +603,8 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 | Ciclo de vida da conversa | [0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Abertura por `customer`; sem encerramento; `status`/`closed_at` reservadas |
 | Grão do humor | [0007](../decisions/ADR-0007-humor-por-conversa.md) | Conversa; `conversation_id` obrigatório no `MoodResponse` |
 | Janela de histórico (T5) | [0007](../decisions/ADR-0007-humor-por-conversa.md) | 30 mensagens `customer` da conversa, `agent` filtrado na API |
+| Formato de `features` (T3) | [0008](../decisions/ADR-0008-abordagens-de-modelo.md) | Dois blocos de texto (`text_clean`, `context_clean`) em `datasets/*`; vetorização no artefato |
+| Arquitetura do modelo | [0008](../decisions/ADR-0008-abordagens-de-modelo.md) | A (TF-IDF + Ridge) primeiro, C (embeddings congelados + Ridge) depois; baseline `DummyRegressor` |
 
 ### 9.2 Em aberto
 
@@ -605,10 +612,10 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 |---|---|---|
 | Regras de limpeza (T1) | `messages.text` no pipeline | Só `strip()` |
 | Local do mascaramento (T2) | `messages.text`, snapshots | Indefinido; ver seção 8 |
-| Formato de `features` (T3) | `datasets/*`, `feature_spec_version` | Indefinido |
+| Encoder da abordagem C | T3, dependências do mood-ml | Fixado na spec de T3 quando C começar (ADR-0008) |
 | Estratégia de geração de personas | `corpus.persona`, qualidade do modelo | Spec da fase F3 |
 | Pseudonimização de `customer_id` | `customers`, todos os artefatos | Mecanismo (HMAC?) indefinido |
-| Versão ativa do modelo | `v_*_mood_latest` | Views não filtram por versão |
+| Versão ativa do modelo | `v_*_mood_latest`, `mood-ml/models/active.json` | Views não filtram por versão; escolha entre A e C em ADR posterior (ADR-0008) |
 | Saída da quarentena | `inference_failures` | Manual, fora do escopo do MVP |
 | Limiar de obsolescência do humor | frontend, via `computed_at` | Indefinido |
 | Limite de 3 falhas configurável por ambiente | política de quarentena | Constante por ora |
@@ -639,6 +646,6 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 | 10 | `ingest` não distingue papéis: tudo é persistido e nada dispara inferência | `agent` em conversa inexistente → `422`; só `customer` dispara inferência (ADR-0006) | [routes.py](../mood-api/app/api/routes.py) |
 | 11 | `GET /mood` não devolve `conversation_id` | Campo obrigatório na resposta (ADR-0007) | [routes.py](../mood-api/app/api/routes.py), [schemas.py](../mood-api/app/models/schemas.py) |
 | 12 | Nenhum índice declarado | `(conversation_id, role, sent_at)` obrigatório para montar a janela (ADR-0007) | [connection.py](../mood-api/app/db/connection.py) |
-| 13 | `clean_message` e `extract_features` vivem em `transform/`, sem vínculo com o treino | Módulo único importado pelo treino e pela inferência, com `feature_spec_version` conferido no load (P4) | [clean.py](../mood-ml/transform/clean.py), [predict.py](../mood-ml/infer/predict.py) |
+| 13 | `clean_message` e `extract_features` vivem em `transform/`, sem vínculo com o treino | Módulo único importado pelo treino e pela inferência, com `feature_spec_version` conferido no load (P4) | [clean.py](../mood-ml/transform/clean.py), [features.py](../mood-ml/transform/features.py), [predict.py](../mood-ml/infer/predict.py) |
 
 O documento e o [README](../README.md) concordam quanto às duas rotas públicas e ao humor por conversa. O que resta no README é detalhe de contrato — `conversation_id` na resposta, semântica do `404` e o `422` na lista de erros —, corrigido junto com esta revisão.
