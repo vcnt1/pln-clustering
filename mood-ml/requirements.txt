@@ -3,3 +3,9 @@ uvicorn[standard]
 pydantic
 scikit-learn
 pandas
+joblib
+pyarrow
+scipy
+pyyaml
+pytest
+ruff

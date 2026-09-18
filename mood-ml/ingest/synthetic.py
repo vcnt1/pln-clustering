@@ -1,6 +1,8 @@
-"""Generates synthetic customer conversations used to bootstrap training."""
+"""Deprecated: the labeled dataset arrives ready (contract dc-1), so this generator is not used.
+
+Kept only as a reference for data-model §4.1. See specs/02-ingest-validate.md.
+"""
 
 
 def generate_synthetic_conversations(n_conversations: int) -> list[dict]:
-    # TODO: define the synthetic data generation strategy (see README).
-    raise NotImplementedError
+    raise NotImplementedError("deprecated: use ingest.validate on a dc-1 .jsonl file")

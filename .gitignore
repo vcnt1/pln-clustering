@@ -187,6 +187,9 @@ dist/
 *.duckdb
 data/
 
+# mood-ml model artifacts
+mood-ml/models/
+
 # Cython debug symbols
 cython_debug/
 

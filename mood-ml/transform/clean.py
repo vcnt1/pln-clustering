@@ -1,11 +1,6 @@
-"""Cleans raw messages and extracts features for the mood model."""
+"""T1: normalizes raw message text (see specs/04-transform.md)."""
 
 
 def clean_message(text: str) -> str:
-    # TODO: define cleaning rules (boilerplate removal, PII masking, etc.).
+    # TODO: define cleaning rules in spec 04 (whitespace/newlines; keep case, punctuation, emojis).
     return text.strip()
-
-
-def extract_features(messages: list[str]) -> list[float]:
-    # TODO: replace with the chosen feature/embedding strategy.
-    raise NotImplementedError
