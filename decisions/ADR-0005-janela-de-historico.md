@@ -1,6 +1,6 @@
 # ADR-0005: Janela de histórico com 30 mensagens do cliente, sem `agent`
 
-- **Status:** aceito
+- **Status:** superseded por [ADR-0007](ADR-0007-humor-por-conversa.md)
 - **Data:** 2026-09-17
 - **Princípios tocados:** P4, P5
 - **Depende de:** ADR-0003 (encerramento não delimita a janela)

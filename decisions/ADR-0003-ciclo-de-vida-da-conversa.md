@@ -1,6 +1,6 @@
 # ADR-0003: Ciclo de vida da conversa
 
-- **Status:** aceito
+- **Status:** superseded por [ADR-0006](ADR-0006-sem-encerramento-no-mvp.md)
 - **Data:** 2026-09-17
 - **Princípios tocados:** P1
 - **Referência:** `data-structure/data-model.md`, seções 3.2 e 9

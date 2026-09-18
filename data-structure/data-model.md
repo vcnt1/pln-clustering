@@ -25,15 +25,17 @@ Os princípios da [constituição](../decisions/constitution.md) são invioláve
 | **P4** — T1 e T3 idênticos no treino e na inferência | `feature_spec_version` e `history_window` no manifesto amarram o contrato de features | 4.4, 6 |
 | **P5** — Nenhum dado com PII sai do DuckDB | `display_name` fora de snapshots/datasets; `detail` sem texto de conversa; `customer_id` pseudônimo | 3.6, 4.2, 8 |
 
-ADRs aceitos, todos de 2026-09-17:
+ADRs vigentes:
 
 | ADR | Decisão | Seções afetadas |
 |---|---|---|
 | [ADR-0001](../decisions/ADR-0001-escala-do-humor.md) | Escala contínua `-1 to 1`, `mood_label` nulo no MVP | 2.2, 2.3, 3.4, 3.5, 6 (T6) |
 | [ADR-0002](../decisions/ADR-0002-origem-do-ground-truth.md) | Ground truth do MVP é o `generated_label` sintético | 4.1, 4.3, 6 (T4) |
-| [ADR-0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) | Abertura, encerramento manual e reabertura de conversa | 2.1, 2.4, 3.2, 7 |
 | [ADR-0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Retentativa absorvida pela próxima mensagem; quarentena após 3 falhas | 2.3, 3.6, 3.7 |
-| [ADR-0005](../decisions/ADR-0005-janela-de-historico.md) | Janela de 30 mensagens `customer`, escopo cliente, `agent` filtrado na API | 2.2, 3.3, 4.4, 6 (T5) |
+| [ADR-0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Duas rotas públicas; encerramento de conversa fora do MVP | 2.1, 3.2, 7 |
+| [ADR-0007](../decisions/ADR-0007-humor-por-conversa.md) | Humor pertence à conversa; janela de 30 mensagens `customer` **da conversa** | 2.2, 2.3, 3.3, 3.4, 3.7, 4.4, 6 (T5) |
+
+Substituídos, mantidos apenas como registro histórico: [ADR-0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) (ciclo de vida com encerramento) por ADR-0006, e [ADR-0005](../decisions/ADR-0005-janela-de-historico.md) (janela com escopo de cliente) por ADR-0007.
 
 ---
 
@@ -47,12 +49,13 @@ O modelo de dados se divide em duas trilhas que não compartilham armazenamento:
 | # | Estágio | Componente | Entrada | Saída | Grão da saída |
 |---|---|---|---|---|---|
 | 1 | Ingestão | mood-api `POST /v1alpha1/ingest` | `IngestRequest` (HTTP) | linhas em `customers`, `conversations`, `messages` | mensagem |
-| 2 | Contexto de inferência | mood-api | `messages` | `InferRequest` | mensagem disparadora + 30 mensagens `customer` |
+| 2 | Contexto de inferência | mood-api | `messages` da conversa | `InferRequest` | até 30 mensagens `customer` da conversa |
 | 3 | Inferência | mood-ml `POST /internal/v1/infer` | `InferRequest` | `InferResponse` | uma inferência |
-| 4 | Registro do humor | mood-api | `InferResponse` | linha em `mood_scores` ou `inference_failures` | uma inferência |
-| 5 | Consulta | mood-api `GET /v1alpha1/customer/<id>/mood` | `v_customer_mood_latest` | `MoodResponse` | cliente |
-| 6 | Encerramento | mood-api `POST /v1alpha1/conversation/<id>/close` | `conversation_id` | `conversations` atualizada | conversa |
-| 7 | Treino (offline) | mood-ml `ingest/`, `transform/`, `train/` | corpus sintético | dataset rotulado, artefato de modelo + manifesto | exemplo de treino / versão de modelo |
+| 4 | Registro do humor | mood-api | `InferResponse` | linha em `mood_scores` ou `inference_failures` | uma inferência (humor da **conversa**) |
+| 5 | Consulta | mood-api `GET /v1alpha1/customer/<id>/mood` | `v_customer_mood_latest` | `MoodResponse` | conversa mais recentemente pontuada do cliente |
+| 6 | Treino (offline) | mood-ml `ingest/`, `transform/`, `train/` | corpus sintético | dataset rotulado, artefato de modelo + manifesto | exemplo de treino / versão de modelo |
+
+**São duas rotas públicas** (ADR-0006): `POST /v1alpha1/ingest` e `GET /v1alpha1/customer/<id>/mood`.
 
 ```
                     TRILHA ONLINE (DuckDB, escritor único = mood-api)   [P1]
@@ -61,9 +64,9 @@ chat-app ──IngestRequest──► mood-api ──► customers / conversatio
                                │
                                │  só role=customer dispara inferência
                                ├──InferRequest──► mood-ml (infer) ──InferResponse──┐
-                               │   (30 msgs customer)                               │
+                               │   (30 msgs customer DA CONVERSA)                   │
                                ◄────────────────────────────────────────────────────┘
-                               ├──► mood_scores (append-only) [P2]
+                               ├──► mood_scores (append-only, humor da conversa) [P2]
                                └──► inference_failures (erro ou quarentena) [P3]
 
 chat-app ◄──MoodResponse─── v_customer_mood_latest
@@ -100,12 +103,11 @@ Respostas:
 | `202` (mesmo corpo) | Mensagem persistida, inferência assíncrona |
 | `400` | Payload inválido, ou `customer_id` diferente do dono da conversa |
 | `413` | Mensagem acima do tamanho máximo |
-| `422` | **Decidido (ADR-0003):** `role = 'agent'` para um `conversation_id` inexistente. O atendente responde a um atendimento, nunca o inicia |
+| `422` | **Decidido (ADR-0006):** `role = 'agent'` para um `conversation_id` inexistente. O atendente responde a um atendimento, nunca o inicia |
 
-Regras de efeito, **decididas (ADR-0003 e ADR-0005)**:
+Regras de efeito, **decididas (ADR-0006 e ADR-0007)**:
 
-- `role = 'customer'` em conversa inexistente **cria** a conversa (`status = 'open'`).
-- `role = 'customer'` em conversa `closed` **reabre** a conversa (`status = 'open'`, `closed_at = null`) e é processada normalmente.
+- `role = 'customer'` em conversa inexistente **cria** a conversa (`status = 'open'`, valor fixo — ver 3.2).
 - **Só `role = 'customer'` dispara inferência.** Mensagens `agent` são persistidas e nada mais.
 - Conversa em quarentena (ADR-0004) persiste a mensagem e grava `inference_failures` com `error_code = 'quarantined'`, sem chamar o mood-ml.
 
@@ -132,11 +134,11 @@ Contrato interno, não exposto ao frontend.
 | `text` | string | Texto como persistido; mascarado ou não, conforme T2 (em aberto) |
 | `sent_at` | string ISO-8601 UTC | — |
 
-> **Decidido (ADR-0005) — janela de histórico (T5):** as **30 mensagens `customer` mais recentes do cliente**, com escopo de **cliente** e não de conversa: a janela atravessa `conversation_id`, inclusive conversas encerradas. Mensagens `agent` **não entram**, e o filtro é aplicado **na API**, ao montar o `InferRequest` — decisão tomada em favor de P5 (menos PII em trânsito), ao custo de acoplar a API a uma escolha de modelagem. O campo `role` permanece no contrato para permitir reativar contexto de atendente sem mudar o esquema.
+> **Decidido (ADR-0007) — janela de histórico (T5):** as **30 mensagens `customer` mais recentes da conversa** da mensagem disparadora. A janela **não atravessa** `conversation_id`: mensagens de outras conversas do mesmo cliente ficam de fora, mesmo sendo recentes. Mensagens `agent` **não entram**, e o filtro é aplicado **na API**, ao montar o `InferRequest` — em favor de P5 (menos PII em trânsito) e de um payload menor, ao custo de acoplar a API a uma escolha de modelagem. O campo `role` permanece no contrato para permitir reativar contexto de atendente sem mudar o esquema.
 >
-> A janela é parte da especificação de features: por P4, mudar tamanho ou critério exige nova `model_version`, e `history_window` no manifesto deve bater com o comportamento da API (divergência impede subir o serviço).
+> A janela é parte da especificação de features: por P4, mudar tamanho **ou escopo** exige nova `model_version`, e `history_window` e `history_scope` no manifesto devem bater com o comportamento da API (divergência impede subir o serviço).
 >
-> Cliente novo produz janela de um item. O modelo precisa se comportar razoavelmente com `len(history) == 1`.
+> **Toda conversa nova começa com `len(history) == 1`** — não é caso de borda de cliente novo, é o início de todo atendimento. O modelo precisa se comportar razoavelmente nessa condição.
 
 `InferResponse` (**planejado**):
 
@@ -163,8 +165,10 @@ Contrato interno, não exposto ao frontend.
 | `scale` | string | não | `.scale` (sempre `'-1 to 1'`) |
 | `model_version` | string | não | `.model_version` |
 | `computed_at` | string ISO-8601 UTC | não | `.computed_at` |
-| `conversation_id` | string | não | `.conversation_id` (**planejado**, adição compatível) |
+| `conversation_id` | string | **não** | `.conversation_id` — **obrigatório (ADR-0007)**: identifica a conversa a que o score pertence |
 | `mood_label` | string | sim | `.mood_label` (**planejado**, `null` no MVP) |
+
+**Decidido (ADR-0007) — o que esta rota devolve:** o humor pertence à **conversa**, mas a rota é por cliente. Ela devolve o score da **conversa mais recentemente pontuada** desse cliente, e `conversation_id` diz qual é. Um cliente com duas conversas ativas tem dois humores; esta rota expõe um deles, e o consumidor precisa tratar isso (ver 7).
 
 **Decidido (ADR-0004) — comportamento durante falha:** a rota devolve sempre o **último score bem-sucedido**, mesmo que as inferências mais recentes estejam falhando ou a conversa esteja em quarentena. Nada de `503` e nada de valor neutro. `404` só quando o cliente não tem **nenhuma** linha em `mood_scores` — inclusive quando todas as suas inferências falharam.
 
@@ -172,16 +176,7 @@ Esse comportamento é emergente: como `mood_scores` é append-only (P2) e falha 
 
 > **Limitação assumida:** o humor pode estar obsoleto sem que a resposta diga isso. O campo `computed_at` já permite ao frontend sinalizar obsolescência (ver 7); o limiar está em aberto.
 
-### 2.4 `POST /v1alpha1/conversation/<conversation_id>/close`
-
-**Decidido (ADR-0003).** Terceira rota pública, ausente do README original.
-
-| Status | Corpo | Quando |
-|---|---|---|
-| `200` | `{"conversation_id", "status": "closed", "closed_at"}` | Conversa encerrada |
-| `404` | — | `conversation_id` inexistente |
-
-**Idempotente:** fechar uma conversa já fechada devolve `200` com o `closed_at` **original**, que nunca é sobrescrito.
+> **Não existe rota de encerramento de conversa (ADR-0006).** O MVP tem exatamente estas duas rotas públicas.
 
 ---
 
@@ -191,7 +186,7 @@ Arquivo: `mood-api/data/mood.duckdb` ([connection.py](../mood-api/app/db/connect
 
 Duas naturezas de tabela convivem aqui, e a diferença é deliberada:
 
-- **Dimensões mutáveis** (`customers`, `conversations`): guardam estado atual, com `UPDATE`.
+- **Dimensões mutáveis** (`customers`, `conversations`): guardam estado atual, com `UPDATE`. Sem encerramento de conversa (ADR-0006), o único campo que muda depois da criação é `last_message_at`.
 - **Fatos imutáveis** (`messages`, `mood_scores`, `inference_failures`): append-only. P2 vale para `mood_scores`; as outras duas seguem a mesma disciplina por coerência.
 
 ```mermaid
@@ -201,9 +196,8 @@ erDiagram
     conversations ||--o{ messages : "contém"
     messages ||--o{ mood_scores : "dispara"
     messages ||--o{ inference_failures : "dispara"
-    conversations ||--o{ mood_scores : "contextualiza"
-    conversations ||--o{ inference_failures : "contextualiza"
-    customers ||--o{ mood_scores : "tem humor"
+    conversations ||--o{ mood_scores : "tem humor"
+    conversations ||--o{ inference_failures : "acumula falhas"
 ```
 
 ### 3.1 `customers`
@@ -219,31 +213,29 @@ Uma linha por cliente. Criada no primeiro `ingest` do cliente (upsert).
 
 ### 3.2 `conversations`
 
-Uma linha por conversa. Um cliente pode ter várias conversas; uma conversa pertence a exatamente um cliente. Dimensão **mutável**.
+Uma linha por conversa. Um cliente pode ter várias conversas; uma conversa pertence a exatamente um cliente. Depois da criação, só `last_message_at` muda.
 
 | Coluna | Tipo | Nulo? | Restrição | Descrição |
 |---|---|---|---|---|
 | `conversation_id` | VARCHAR | não | PK | Recebido no ingest |
 | `customer_id` | VARCHAR | não | FK → `customers` | Fixado na criação; ingest com outro `customer_id` para a mesma conversa é rejeitado com `400` |
 | `started_at` | TIMESTAMPTZ | não | — | `sent_at` da primeira mensagem |
-| `last_message_at` | TIMESTAMPTZ | não | — | `sent_at` da mensagem mais recente |
-| `status` | VARCHAR | não | `open` \| `closed` | **Decidido (ADR-0003).** Padrão `open` |
-| `closed_at` | TIMESTAMPTZ | sim | — | Preenchido no encerramento; `null` enquanto `open` |
+| `last_message_at` | TIMESTAMPTZ | não | — | `sent_at` da mensagem mais recente. Critério de ordenação da lista de conversas |
+| `status` | VARCHAR | não | sempre `'open'` | **Coluna reservada (ADR-0006)** |
+| `closed_at` | TIMESTAMPTZ | sim | sempre `null` | **Coluna reservada (ADR-0006)** |
 
-Ciclo de vida, **decidido (ADR-0003)**:
+Ciclo de vida, **decidido (ADR-0006)**:
 
 | Evento | Efeito |
 |---|---|
 | Primeiro `ingest` com `role = 'customer'` | Cria a conversa com `status = 'open'`, `closed_at = null` |
 | `ingest` com `role = 'agent'` em conversa inexistente | Rejeitado com `422`; nada é criado |
-| `POST .../close` | `status = 'closed'`, `closed_at = now()`. Repetido, preserva o `closed_at` original |
-| `ingest` com `role = 'customer'` em conversa `closed` | Reabre: `status = 'open'`, `closed_at = null`. A mensagem é persistida e dispara inferência |
 
-**Proibido:** criar conversa a partir de mensagem `agent`; sobrescrever `closed_at` em fechamento repetido.
+**Não há encerramento de conversa no MVP** e, por consequência, não há reabertura nem conversa em estado `closed`. `status` e `closed_at` existem apenas para que a feature possa voltar sem migração de esquema.
 
-`status` **não** representa quarentena de inferência — são dimensões ortogonais, e uma conversa pode estar encerrada e em quarentena ao mesmo tempo (ver 3.6).
+**Proibido:** criar conversa a partir de mensagem `agent`; escrever `status` ou `closed_at` com qualquer valor fora de `'open'` e `null` enquanto não houver ADR que reviva o encerramento.
 
-> **Limitação assumida (ADR-0003):** a reabertura destrói o histórico de encerramentos. Uma conversa fechada e reaberta cinco vezes guarda só o último `closed_at`. Se a duração do atendimento virar métrica, a solução é uma tabela `conversation_events` append-only, com `status` derivado por view — fora do escopo do MVP.
+`status` **não** representa quarentena de inferência: quarentena é estado derivado de `inference_failures` (ver 3.6), nunca coluna.
 
 ### 3.3 `messages`
 
@@ -260,12 +252,14 @@ Uma linha por mensagem, dos dois papéis. Tabela **imutável**: não há `UPDATE
 | `received_at` | TIMESTAMPTZ | não | padrão `now()` | Momento em que a API persistiu |
 | `client_message_id` | VARCHAR | sim | UNIQUE (`conversation_id`, `client_message_id`) | Idempotência de reenvio |
 
-Índices, **decididos (ADR-0005)**:
+Índices, **decididos (ADR-0007)**:
 
 | Índice | Para quê |
 |---|---|
-| (`customer_id`, `role`, `sent_at`) | **Obrigatório.** Monta a janela de 30 mensagens `customer` do cliente. Sem ele, a consulta vira scan à medida que `messages` cresce |
+| (`conversation_id`, `role`, `sent_at`) | **Obrigatório.** Monta a janela de 30 mensagens `customer` da conversa. Sem ele, a consulta vira scan à medida que `messages` cresce |
 | (`conversation_id`, `sent_at`) | Listagem de mensagens da conversa no frontend |
+
+Os dois têm o mesmo prefixo: a janela e a contagem de quarentena (3.7) passaram a filtrar pela mesma coluna, o que era o descompasso deixado pelo escopo de cliente do ADR-0005.
 
 ### 3.4 `mood_scores` — histórico append-only (P2)
 
@@ -275,8 +269,8 @@ Uma linha por **inferência bem-sucedida**. Nunca é atualizada nem apagada: o h
 |---|---|---|---|---|
 | `mood_id` | VARCHAR (UUID) | não | PK | Gerado pela API |
 | `request_id` | VARCHAR (UUID) | não | UNIQUE | Correlaciona com o `InferRequest` |
-| `customer_id` | VARCHAR | não | FK → `customers` | — |
-| `conversation_id` | VARCHAR | não | FK → `conversations` | Conversa da mensagem disparadora |
+| `customer_id` | VARCHAR | não | FK → `customers` | Desnormalizado; sustenta a rota de humor por cliente |
+| `conversation_id` | VARCHAR | não | FK → `conversations` | **Grão semântico da linha (ADR-0007):** o score é o humor desta conversa |
 | `trigger_message_id` | VARCHAR | não | FK → `messages` | Mensagem `customer` que originou a inferência |
 | `score` | DOUBLE | não | `BETWEEN -1.0 AND 1.0` | **Decidido (ADR-0001)** |
 | `scale` | VARCHAR | não | `'-1 to 1'` no MVP | Escala em que `score` está expresso |
@@ -286,6 +280,8 @@ Uma linha por **inferência bem-sucedida**. Nunca é atualizada nem apagada: o h
 | `persisted_at` | TIMESTAMPTZ | não | padrão `now()` | Momento da gravação na API |
 
 Uma mesma mensagem pode ter mais de uma linha, por exemplo em uma reinferência com outra `model_version`. Por isso a chave natural é (`trigger_message_id`, `model_version`), e não só a mensagem.
+
+**Grão (ADR-0007):** cada linha é o humor de uma **conversa** em um instante, calculado só a partir de mensagens daquela conversa. Duas conversas do mesmo cliente produzem séries independentes.
 
 > **Limitação assumida (ADR-0004): `mood_scores` não é registro completo por mensagem.** Como a retentativa é absorvida pela mensagem seguinte, a mensagem que falhou nunca ganha linha própria — o `trigger_message_id` do sucesso posterior é o da mensagem nova. Qualquer análise de cobertura precisa cruzar `messages` com `mood_scores` **e** `inference_failures`.
 
@@ -337,7 +333,19 @@ Domínio de `error_code`:
 
 ### 3.7 Views e consultas derivadas
 
-**`v_customer_mood_latest`**: último humor por cliente. É a origem do `MoodResponse`.
+**`v_conversation_mood_latest`**: humor atual de cada conversa. É a view **primária**, porque o humor pertence à conversa (ADR-0007).
+
+```sql
+CREATE VIEW v_conversation_mood_latest AS
+SELECT * EXCLUDE (rn) FROM (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY conversation_id ORDER BY computed_at DESC, persisted_at DESC
+    ) AS rn
+    FROM mood_scores
+) WHERE rn = 1;
+```
+
+**`v_customer_mood_latest`**: humor da **conversa mais recentemente pontuada** de cada cliente. Existe para sustentar a rota por cliente, que o ADR-0006 manteve como uma das duas públicas. Não é uma agregação do cliente: é a linha de uma conversa específica, e `conversation_id` diz qual.
 
 ```sql
 CREATE VIEW v_customer_mood_latest AS
@@ -348,8 +356,6 @@ SELECT * EXCLUDE (rn) FROM (
     FROM mood_scores
 ) WHERE rn = 1;
 ```
-
-**`v_conversation_mood_latest`**: mesma lógica, com `PARTITION BY conversation_id`. Atende o frontend, que mostra um emoji **por conversa**.
 
 **Quarentena (ADR-0004)**: falhas consecutivas da conversa desde a última inferência bem-sucedida. Roda a cada ingest de `customer`, antes de chamar o mood-ml; a partir de 3, a inferência não é tentada.
 
@@ -459,6 +465,7 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
   "label_set_id": "ls-2026-09-17-syn",
   "feature_spec_version": "fs-0",
   "history_window": 30,
+  "history_scope": "conversation",
   "algorithm": null,
   "metrics": { "mae": null, "rmse": null },
   "code_commit": "<git sha>"
@@ -471,7 +478,7 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
 | `scale` | sim | `'-1 to 1'` (ADR-0001). Invariante por versão |
 | `mood_labels` | sim | `null` no MVP |
 | `dataset_id`, `label_set_id`, `feature_spec_version` | sim | Rastreabilidade até os dados e as features de treino |
-| `history_window` | sim | `30` (ADR-0005). **Conferido no carregamento do modelo**: divergência em relação ao comportamento da API viola P4 e impede subir o serviço |
+| `history_window`, `history_scope` | sim | `30` e `"conversation"` (ADR-0007). **Conferidos no carregamento do modelo**: divergência em relação ao comportamento da API viola P4 e impede subir o serviço |
 | `metrics` | sim | Métricas de **regressão** (MAE, RMSE). Acurácia não se aplica (ADR-0001) |
 | `algorithm` | não | Em aberto até a arquitetura do modelo ser definida |
 | `code_commit` | sim | Commit do código que treinou o modelo |
@@ -492,8 +499,10 @@ Customer (customer_id) ──1:N── Conversation (conversation_id) ──1:N�
                                                                           └── InferenceFailure (failure_id)
 ```
 
-- **Cliente ≠ conversa.** Um cliente pode ter várias conversas. O humor é consultado por cliente (`MoodResponse`), exibido por conversa (`v_conversation_mood_latest`) e **calculado por cliente**: a janela de contexto atravessa conversas, inclusive encerradas (ADR-0005).
-- **Encerrar conversa não limpa o contexto.** Fechar é evento de atendimento, não de dados (ADR-0003 × ADR-0005).
+- **O humor pertence à conversa** (ADR-0007). É calculado só com mensagens da conversa, gravado com `conversation_id` e exibido por conversa. A rota pública é por cliente apenas porque o MVP tem duas rotas (ADR-0006), e devolve a conversa mais recentemente pontuada.
+- **Um cliente pode ter vários humores ao mesmo tempo**, um por conversa ativa. Nenhum deles é "o humor do cliente": não existe agregação por cliente no modelo.
+- **A janela não atravessa conversas.** Conversa nova começa sem contexto, mesmo para cliente antigo — o sinal entre atendimentos foi abandonado de propósito (ADR-0007).
+- **Conversa não tem ciclo de vida** (ADR-0006): nasce na primeira mensagem `customer` e não é encerrada nem reaberta.
 - **Toda mensagem tem identidade própria** (`message_id`). A deduplicação de reenvio usa (`conversation_id`, `client_message_id`), quando informado.
 - **Humor é um evento, não um estado** (P2). A chave natural de `mood_scores` é (`trigger_message_id`, `model_version`); o estado atual é sempre derivado por view.
 - **Só mensagens `customer` disparam inferência.** Uma `agent` é persistida, mas nunca aparece como `trigger_message_id` nem entra na janela de histórico do MVP.
@@ -513,15 +522,15 @@ Cada transformação é definida pelo **contrato**: onde roda, o que recebe e o 
 | T2 | Mascaramento de PII | **em aberto** | indefinido: antes de persistir (mood-api) ou só no ML | `text: str` → `text` com marcadores | nenhum. Pendente: local de execução, tipos cobertos (CPF, telefone, e-mail, nomes), formato dos marcadores |
 | T3 | Extração de features | **em aberto** | mood-ml `transform/clean.py` (`extract_features`) | lista de `HistoryMessage` → `features` | `NotImplementedError`. Pendente: features clássicas ou embeddings; o formato define `datasets/*.features` e `feature_spec_version` |
 | T4 | Rotulagem | **decidida (ADR-0002)** | mood-ml, no gerador sintético | persona + trajetória → `generated_label` | `label_source = 'synthetic'`, `target_type = 'message'`, escala `-1 to 1`. O rótulo nasce com o dado |
-| T5 | Janela de contexto | **decidida (ADR-0005)** | mood-api (monta) → mood-ml (consome) | `messages` do cliente → `InferRequest.history` | 30 mensagens `customer` mais recentes do **cliente**, ordem crescente, `agent` filtrado na API |
+| T5 | Janela de contexto | **decidida (ADR-0007)** | mood-api (monta) → mood-ml (consome) | `messages` da conversa → `InferRequest.history` | 30 mensagens `customer` mais recentes da **conversa**, ordem crescente, `agent` filtrado na API |
 | T6 | Score → categoria | **fora do escopo (ADR-0001)** | — | `score` → `mood_label` | `mood_label = null`. O frontend faz o mapeamento para emoji ([mood.ts](../chat-app/src/utils/mood.ts)) |
 
 Invariantes que qualquer implementação futura deve respeitar:
 
-1. **P4:** T1 e T3 aplicados no treino e na inferência são o mesmo código, na mesma versão, importado de um único módulo. `feature_spec_version` e `history_window` no manifesto declaram o vínculo e são conferidos ao carregar o modelo.
+1. **P4:** T1 e T3 aplicados no treino e na inferência são o mesmo código, na mesma versão, importado de um único módulo. `feature_spec_version`, `history_window` e `history_scope` no manifesto declaram o vínculo e são conferidos ao carregar o modelo.
 2. **P2:** nenhuma transformação altera linhas já gravadas em `messages` ou `mood_scores`. Reprocessamento gera linhas novas.
 3. **P3:** transformação que falha gera `inference_failures` e nunca produz valor padrão.
-4. **ADR-0005:** mudar o tamanho ou o critério da janela exige nova `model_version` — a janela é especificação de features, não parâmetro operacional.
+4. **ADR-0007:** mudar o tamanho **ou o escopo** da janela exige nova `model_version` — a janela é especificação de features, não parâmetro operacional. Compor a janela com mensagens de outra conversa é proibido.
 
 ---
 
@@ -535,15 +544,20 @@ O [chat-app](../chat-app/src/App.tsx) depende destes campos:
 | Barra de humor | mesmo par, normalizado pela mesma função que produz o emoji |
 | Tag de versão do modelo | `MoodResponse.model_version` |
 | Indicador de humor obsoleto | `MoodResponse.computed_at` (ADR-0004) |
-| Associação do humor à conversa | `MoodResponse.customer_id` (planejado: `conversation_id`) |
-| Ativos × histórico | `conversations.status`, `closed_at` (ADR-0003) |
-| Encerrar atendimento | `POST /v1alpha1/conversation/<id>/close` (ADR-0003) |
+| A que conversa o humor pertence | `MoodResponse.conversation_id` (obrigatório, ADR-0007) |
+| Ordenação da lista de conversas | `conversations.last_message_at` |
 | Lista de conversas: `id`, `customerId`, `customerName`, `lastSeen` | `conversations.conversation_id`, `customer_id`, `customers.display_name`, `conversations.last_message_at` |
 | Mensagens: `id`, `role`, `text`, `time` | `messages.message_id`, `role`, `text`, `sent_at` |
 
 Renomear ou mudar o tipo de `score`, `scale` ou `model_version` quebra o frontend.
 
+**Regra de exibição (ADR-0007):** o humor é da conversa, e a rota devolve o de **uma** conversa. O emoji só pode ser exibido na conversa cujo `id` for igual ao `conversation_id` da resposta; nas demais conversas do mesmo cliente, o frontend mostra um **estado vazio**, nunca o score recebido. Repetir o mesmo emoji em todas as conversas do cliente exibiria ao atendente um humor que não foi calculado para aquele atendimento.
+
+**Estado vazio ≠ humor neutro.** `404` significa "ainda não há humor calculado" e não pode virar 😐: um emoji neutro reintroduziria na interface o score de fallback que P3 proíbe no banco. O vazio precisa ser visualmente distinto de qualquer valor da escala.
+
 **Indicador de obsolescência (ADR-0004):** como a API devolve o último humor válido mesmo durante falhas, o frontend deve derivar de `computed_at` um sinal visual quando o score passar de um limiar de idade. Não altera o contrato, apenas usa um campo existente. O limiar está em aberto.
+
+> **Sem separação ativos × histórico (ADR-0006):** como não há encerramento de conversa, a lista é ordenada por `last_message_at` e cresce indefinidamente.
 
 > **Em aberto:** rotas de leitura de conversas e mensagens (hoje mockadas em `App.tsx`) e mecanismo de atualização do humor (polling, SSE ou WebSocket). O esquema de 3.1–3.3 já atende essas rotas sem alterações.
 
@@ -556,7 +570,7 @@ Renomear ou mudar o tipo de `score`, `scale` ou `model_version` quebra o fronten
 | `customer_id` | todas as tabelas, artefatos de ML | Sempre **pseudônimo**, nunca telefone ou e-mail em claro. Se a origem só tiver telefone, a API guarda hash com segredo (HMAC). **Em aberto:** o mecanismo |
 | `display_name` | `customers` | PII. Só no DuckDB; excluído por construção de snapshots e datasets |
 | `text` | `messages`, snapshots, datasets | Pode conter CPF, telefone, e-mail. Mascaramento em T2 (em aberto) |
-| `text` de `agent` | `messages` | Não trafega no `InferRequest`: a janela só leva mensagens `customer` (ADR-0005), o que reduz PII em trânsito |
+| `text` de `agent` | `messages` | Não trafega no `InferRequest`: a janela só leva mensagens `customer` (ADR-0007), o que reduz PII em trânsito |
 | `inference_failures.detail` | DuckDB | Nunca contém trechos de mensagem. Logs de erro carregam `message_id`, nunca `text` |
 | `annotator` | `labels` | Pseudônimo. `null` no MVP |
 | Corpus sintético | `raw/synthetic/` | Sem PII por construção — os artefatos de ML do MVP nascem em conformidade com P5 |
@@ -577,11 +591,13 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 | Métrica de avaliação | [0001](../decisions/ADR-0001-escala-do-humor.md) | Regressão: MAE/RMSE em `manifest.metrics` |
 | Ground truth | [0002](../decisions/ADR-0002-origem-do-ground-truth.md) | `generated_label` sintético, `label_source = 'synthetic'` |
 | Grão do rótulo | [0002](../decisions/ADR-0002-origem-do-ground-truth.md) | `target_type = 'message'` |
-| Ciclo de vida da conversa | [0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) | Abertura por `customer`, fechamento manual idempotente, reabertura por `customer` |
 | Retentativa de falhas | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Absorvida pela próxima mensagem; sem job nem fila |
 | Comportamento durante falha | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Último score válido; `404` só sem nenhum score |
 | Quarentena | [0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | 3 falhas consecutivas por conversa, estado derivado por consulta |
-| Janela de histórico (T5) | [0005](../decisions/ADR-0005-janela-de-historico.md) | 30 mensagens `customer` do cliente, `agent` filtrado na API |
+| Rotas públicas | [0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Duas: `ingest` e `customer/<id>/mood` |
+| Ciclo de vida da conversa | [0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Abertura por `customer`; sem encerramento; `status`/`closed_at` reservadas |
+| Grão do humor | [0007](../decisions/ADR-0007-humor-por-conversa.md) | Conversa; `conversation_id` obrigatório no `MoodResponse` |
+| Janela de histórico (T5) | [0007](../decisions/ADR-0007-humor-por-conversa.md) | 30 mensagens `customer` da conversa, `agent` filtrado na API |
 
 ### 9.2 Em aberto
 
@@ -598,8 +614,12 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 | Limite de 3 falhas configurável por ambiente | política de quarentena | Constante por ora |
 | Inferência síncrona ou assíncrona | resposta `200`/`202` do ingest | Ambas previstas |
 | Tamanho máximo de mensagem | `413` no ingest | Indefinido |
-| Ponderação por recência na janela | T3 | Mitigação futura do contexto que não expira |
+| Ponderação por recência na janela | T3 | Em aberto |
 | Exportação de snapshots | `raw/snapshots/` | Pós-MVP |
+| Sinal entre atendimentos | feature derivada no `InferRequest` | Perdido com o escopo de conversa; mitigação futura (ADR-0007) |
+| Rota de humor por conversa | rotas públicas | Só se o frontend precisar de várias conversas ao mesmo tempo |
+| Volta do encerramento de conversa | `conversation_events` append-only | Fora do MVP (ADR-0006) |
+| Autenticação entre serviços | superfície pública | Indefinida (README) |
 
 ---
 
@@ -607,18 +627,18 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 
 | # | Scaffold atual | Planejado | Arquivo |
 |---|---|---|---|
-| 1 | Não há tabelas `customers` e `conversations` | Tabelas 3.1 e 3.2, com FKs e o ciclo de vida do ADR-0003 | [connection.py](../mood-api/app/db/connection.py) |
+| 1 | Não há tabelas `customers` e `conversations` | Tabelas 3.1 e 3.2, com FKs e a criação de conversa do ADR-0006 | [connection.py](../mood-api/app/db/connection.py) |
 | 2 | `messages` com colunas `id`, `message`, `timestamp` | `message_id`, `text`, `sent_at`, mais `received_at` e `client_message_id` | [connection.py](../mood-api/app/db/connection.py) |
 | 3 | `TIMESTAMP` sem timezone | `TIMESTAMPTZ` em UTC | [connection.py](../mood-api/app/db/connection.py) |
 | 4 | `mood_scores` com PK `customer_id`, que sobrescreve o humor anterior | Append-only com `mood_id` + views de humor atual (P2) | [connection.py](../mood-api/app/db/connection.py), [routes.py](../mood-api/app/api/routes.py) |
 | 5 | Não há registro de falhas nem quarentena | `inference_failures` com `conversation_id` e consulta de quarentena (P3, ADR-0004) | — |
-| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `trigger_message_id`, `history` de até 30 mensagens `customer` (ADR-0005) | [predict.py](../mood-ml/infer/predict.py) |
+| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `trigger_message_id`, `history` de até 30 mensagens `customer` da conversa (ADR-0007) | [predict.py](../mood-ml/infer/predict.py) |
 | 7 | `InferResponse` não ecoa conversa, mensagem nem pedido; placeholder `score=0.0`, `scale="neutral"` | Ecos + `scale = '-1 to 1'`; erro via HTTP, nunca score padrão (P3, ADR-0001) | [predict.py](../mood-ml/infer/predict.py) |
 | 8 | Mocks do frontend usam `'0 to 1'` e `'-1 to 1'`, e a barra sempre assume `-1..1` | Escala única `-1 to 1`; barra normalizada pela mesma função do emoji | [App.tsx](../chat-app/src/App.tsx), [api.ts](../chat-app/src/services/api.ts) |
 | 9 | Resposta do ingest não devolve `message_id` | `{"status", "message_id"}` | [routes.py](../mood-api/app/api/routes.py) |
-| 10 | `ingest` não distingue papéis: tudo é persistido e nada dispara inferência | `agent` em conversa inexistente → `422`; só `customer` dispara inferência (ADR-0003) | [routes.py](../mood-api/app/api/routes.py) |
-| 11 | Não existe rota de encerramento | `POST /v1alpha1/conversation/<id>/close`, idempotente (ADR-0003) | [routes.py](../mood-api/app/api/routes.py), [README](../README.md) |
-| 12 | Nenhum índice declarado | `(customer_id, role, sent_at)` obrigatório para montar a janela (ADR-0005) | [connection.py](../mood-api/app/db/connection.py) |
+| 10 | `ingest` não distingue papéis: tudo é persistido e nada dispara inferência | `agent` em conversa inexistente → `422`; só `customer` dispara inferência (ADR-0006) | [routes.py](../mood-api/app/api/routes.py) |
+| 11 | `GET /mood` não devolve `conversation_id` | Campo obrigatório na resposta (ADR-0007) | [routes.py](../mood-api/app/api/routes.py), [schemas.py](../mood-api/app/models/schemas.py) |
+| 12 | Nenhum índice declarado | `(conversation_id, role, sent_at)` obrigatório para montar a janela (ADR-0007) | [connection.py](../mood-api/app/db/connection.py) |
 | 13 | `clean_message` e `extract_features` vivem em `transform/`, sem vínculo com o treino | Módulo único importado pelo treino e pela inferência, com `feature_spec_version` conferido no load (P4) | [clean.py](../mood-ml/transform/clean.py), [predict.py](../mood-ml/infer/predict.py) |
 
-> O README ainda descreve duas rotas públicas e mensagens `agent` filtradas no cálculo de humor. Os dois pontos mudaram (ADR-0003 e ADR-0005) e o README precisa ser atualizado.
+O documento e o [README](../README.md) concordam quanto às duas rotas públicas e ao humor por conversa. O que resta no README é detalhe de contrato — `conversation_id` na resposta, semântica do `404` e o `422` na lista de erros —, corrigido junto com esta revisão.

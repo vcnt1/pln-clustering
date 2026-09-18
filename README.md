@@ -69,27 +69,39 @@ exigir); não acessa o arquivo DuckDB diretamente.
 
 ## Backend API
 
+São duas rotas públicas. O encerramento de conversa está fora do escopo do MVP
+(ver `decisions/ADR-0006`).
+
 - `POST /v1alpha1/ingest`
   - Corpo: `{"conversation_id": "string", "customer_id": "string", "role": "customer|agent", "message": "string", "timestamp": "ISO 8601"}`
   - Resposta: `200 OK` (mensagem persistida) ou `202 Accepted` (se o cálculo de
     humor for assíncrono).
   - Persiste a mensagem no DuckDB; mensagens com `role=agent` são
-    armazenadas mas não entram no cálculo de humor do cliente.
+    armazenadas mas não entram no cálculo de humor.
+  - Só uma mensagem `role=customer` cria conversa e dispara inferência. O humor
+    é calculado **por conversa**, sobre as últimas 30 mensagens `customer`
+    daquela conversa.
 - `GET /v1alpha1/customer/<id>/mood`
-  - Resposta: `{"customer_id": "string", "score": number, "scale": "string", "model_version": "string", "computed_at": "ISO 8601"}`.
-  - `404` se o cliente não tiver mensagens ainda.
+  - Resposta: `{"customer_id": "string", "conversation_id": "string", "score": number, "scale": "string", "model_version": "string", "computed_at": "ISO 8601"}`.
+  - Devolve o humor da conversa mais recentemente pontuada do cliente;
+    `conversation_id` diz qual é.
+  - `404` se ainda não houver humor calculado para o cliente — o que inclui
+    cliente com mensagens cujas inferências falharam.
 
-Erros a cobrir: `400` (payload inválido), `404` (cliente/conversa
-inexistente), `413` (mensagem excede tamanho máximo), `429` (rate limit).
-Autenticação/autorização entre serviços ainda não definida.
+Erros a cobrir: `400` (payload inválido), `404` (sem humor calculado),
+`413` (mensagem excede tamanho máximo), `422` (mensagem `agent` para conversa
+inexistente), `429` (rate limit). Autenticação/autorização entre serviços ainda
+não definida.
 
 Persistência em DuckDB, com escritas sequenciais dentro do processo da API.
 
 ## Frontend
 
 Aplicação de chat simples. Para cada conversa exibida, mostra um emoji ao lado
-do nome do cliente representando seu humor atual, obtido via
-`GET /v1alpha1/customer/<id>/mood`.
+do nome do cliente representando o humor daquela conversa, obtido via
+`GET /v1alpha1/customer/<id>/mood`. Como o humor pertence à conversa e a rota
+devolve o de uma só, o emoji aparece apenas na conversa indicada por
+`conversation_id`; nas demais, um estado vazio — que nunca é um emoji neutro.
 
 ## Módulo de Machine Learning
 
@@ -104,21 +116,33 @@ do nome do cliente representando seu humor atual, obtido via
    temperatura de humor atualizada, usada pelo Backend API para responder ao
    endpoint de humor.
 
+## Decisões Fechadas
+
+Cada uma tem um ADR em `decisions/`, e o esquema resultante está em
+`data-structure/data-model.md`. Os princípios invioláveis do projeto estão em
+`decisions/constitution.md`.
+
+- **Definição de "humor"** (ADR-0001): escala contínua `-1 to 1`, sem
+  categorias discretas no MVP. O mapeamento para emoji fica no frontend.
+- **Origem do rótulo/ground truth** (ADR-0002): rótulo sintético gerado junto
+  com o corpus, com grão de mensagem.
+- **Falhas de inferência** (ADR-0004): nunca viram score padrão; a rota de
+  humor devolve o último valor válido, e a conversa entra em quarentena após
+  três falhas consecutivas.
+- **Rotas públicas e ciclo de vida da conversa** (ADR-0006): duas rotas, sem
+  encerramento de conversa.
+- **Grão do humor e janela de contexto** (ADR-0007): humor por conversa,
+  calculado sobre as últimas 30 mensagens `customer` daquela conversa.
+
 ## Decisões em Aberto
 
-- **Definição de "humor"**: escala contínua (temperatura) vs. categorias
-  discretas; isso define o mapeamento para emojis no frontend.
 - **Geração de dados sintéticos**: estratégia para simular perfis de clientes
   e conversas plausíveis para o treino inicial.
 - **Arquitetura do modelo**: features clássicas + classificador/regressor vs.
   embeddings de texto + modelo; trade-off de custo/latência para inferência
-  em tempo real.
+  em tempo real. Como a escala é contínua, o problema é de regressão.
 - **Atualização do modelo**: re-treino periódico vs. atualização incremental
   por cliente conforme novas mensagens chegam.
-- **Esquema de dados no DuckDB**: tabelas para clientes, mensagens, histórico
-  de humor por mensagem/conversa, e versão do modelo usado em cada inferência.
-- **Stack do frontend**: framework a definir; consumirá as duas rotas do
-  Backend API.
 - **Atualização do humor no frontend**: polling, SSE ou WebSocket — decide
   o quão "tempo real" a exibição é.
 - **Sugestão de respostas (extensão futura)**: fora de escopo do MVP; exige
@@ -127,14 +151,12 @@ do nome do cliente representando seu humor atual, obtido via
 
 ## Metodologia e Avaliação (a definir)
 
-Itens obrigatórios antes de iniciar o treino do modelo, ainda em aberto:
+Item obrigatório antes de iniciar o treino do modelo, ainda em aberto:
 
-- **Origem do rótulo/ground truth**: como cada mensagem ou conversa recebe
-  um valor de humor de referência (anotação manual, heurística, proxy como
-  CSAT pós-atendimento).
 - **Orçamento de latência**: meta de tempo de resposta por mensagem (ex.:
   p95 abaixo de um limite definido), que orienta a escolha entre features
-  clássicas e embeddings.
+  clássicas e embeddings. A janela de 30 mensagens dá um teto fixo ao custo
+  de cada inferência.
 
 ## Ética e Privacidade
 
