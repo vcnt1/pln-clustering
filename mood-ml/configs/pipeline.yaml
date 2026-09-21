@@ -1,1 +1,7 @@
 # Pipeline config (seeds, split ratios, hyperparameters). Keys are defined by specs 05 and 06.
+
+split:
+  train_ratio: 0.70
+  validation_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42

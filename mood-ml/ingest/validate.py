@@ -155,7 +155,7 @@ def _check_path_usage(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _sha256_and_size(path: Path) -> tuple[str, int]:
+def sha256_and_size(path: Path) -> tuple[str, int]:
     h = hashlib.sha256()
     size = 0
     with path.open("rb") as f:
@@ -188,6 +188,49 @@ def _with_io_retry(operation: str, func: Any) -> Any:
                 )
             )
     raise CorpusIOError("IG_R15_IO_FAILED", f"{operation} failed after retries: {last_exc}")
+
+
+# ---------------------------------------------------------------------------
+# check_ingest_gate — shared portão, reused by labels/build.py and
+# transform/split.py (LB-R01/R02, SP-R01) so the "is this corpus approved?"
+# check has exactly one implementation.
+# ---------------------------------------------------------------------------
+
+
+class IngestGateError(Exception):
+    """The ingest gate (validation_report.json) does not approve this corpus.
+    `.reason` is one of "missing_report" | "status_not_ok" | "sha256_mismatch";
+    callers translate it into their own spec-mandated error code."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
+
+
+def check_ingest_gate(
+    corpus_path: str | Path, report_dir: str | Path = Path("data/reports")
+) -> dict[str, Any]:
+    """Confirms a validation_report.json with status="ok" and a matching
+    sha256 exists for `corpus_path`. Returns the parsed report dict. Raises
+    IngestGateError otherwise, without reading the corpus's content."""
+    corpus_path = Path(corpus_path)
+    corpus_id = corpus_path.stem
+    report_path = Path(report_dir) / corpus_id / "validation_report.json"
+    if not report_path.exists():
+        raise IngestGateError("missing_report", f"no validation_report.json for {corpus_id}")
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("status") != "ok":
+        raise IngestGateError(
+            "status_not_ok", f"validation_report.json status is {report.get('status')!r}"
+        )
+
+    sha256_hex, _ = sha256_and_size(corpus_path)
+    if report["source"]["sha256"] != sha256_hex:
+        raise IngestGateError("sha256_mismatch", "corpus file changed after validation")
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +267,7 @@ def validate_corpus(path: str | Path, skip_composition: bool = False) -> Validat
     path = Path(path)
     started_at = datetime.now(timezone.utc)
     corpus_id = _check_path_usage(path)
-    sha256_hex, size_bytes = _with_io_retry("open_corpus", lambda: _sha256_and_size(path))
+    sha256_hex, size_bytes = _with_io_retry("open_corpus", lambda: sha256_and_size(path))
 
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -769,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
     report_path = report_dir / "validation_report.json"
 
     try:
-        sha256_hex, _ = _with_io_retry("open_corpus", lambda: _sha256_and_size(path))
+        sha256_hex, _ = _with_io_retry("open_corpus", lambda: sha256_and_size(path))
     except CorpusIOError as exc:
         _log(logging.ERROR, "io_failed", run_id=run_id, operation="fingerprint", detail=exc.detail)
         return 1
