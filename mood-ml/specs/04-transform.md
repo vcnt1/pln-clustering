@@ -1,6 +1,6 @@
 # 04 — Limpeza, Mascaramento e Extração de Features (camada `transform/`, T1 + T2 + T3)
 
-**Status:** Proposta · **Versão da spec:** `tf-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `tf-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §6](../../data-structure/data-model.md) (transformações T1, T2, T3) — este documento fecha T1 e T2 (marcadas "em aberto" lá) e detalha a implementação de T3 (decidida pela ADR-0008).
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (escala), [ADR-0002](../../decisions/ADR-0002-origem-do-ground-truth.md) (grão de mensagem), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (janela de 30 mensagens **da conversa**), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (dois blocos de T3); [constitution.md](../../decisions/constitution.md) P3, P4, P5; [01-dataset-contract.md](01-dataset-contract.md) (campos de origem)
 **Consumido por:** `transform/split.py` (T5 + montagem de exemplos, spec 05, uma chamada por exemplo de treino); `infer/predict.py` (uma chamada por requisição online, spec 08); `ingest/validate.py` reaproveita `count_pii` para medir DC-R14 (spec 02 §3.1, já registrado como dependência)

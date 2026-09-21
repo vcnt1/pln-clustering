@@ -1,6 +1,6 @@
 # 07 — Registro de Versão e Promoção (camada `registry/`)
 
-**Status:** Proposta · **Versão da spec:** `rg-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `rg-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §4.4](../../data-structure/data-model.md) (`models/<model_version>/manifest.json`) e fecha a decisão "em aberto" de `models/active.json` (`data-model.md §9.2`).
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`mood_labels = null`, sem T6), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (`history_window = 30`, `history_scope = "conversation"`), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (`algorithm`); [constitution.md](../../decisions/constitution.md) P3, P4, P5; [06-train-evaluate.md](06-train-evaluate.md) (staging e `eval.json` de origem)
 **Consumido por:** `infer/predict.py` (spec 08) — lê `active.json` na subida do serviço, depois `models/<model_version>/manifest.json` e `model.joblib`

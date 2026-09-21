@@ -1,6 +1,6 @@
 # 03 — Construção do Label Set (camada `labels/`, T4)
 
-**Status:** Proposta · **Versão da spec:** `lb-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `lb-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §4.3](../../data-structure/data-model.md) (tabela `labels/<label_set_id>.parquet`) — este documento diz **como** T4 produz o que aquela seção descreve.
 **Depende de:** ADR-0001 (escala), ADR-0002 (origem do ground truth, grão), ambas em [00-decisoes.md](00-decisoes.md) por remissão; [constitution.md](../../decisions/constitution.md) P1, P4, P5; [02-ingest-validate.md](02-ingest-validate.md) (portão de entrada, `load_corpus()`)
 **Consumido por:** `transform/split.py` (T5, spec 05)

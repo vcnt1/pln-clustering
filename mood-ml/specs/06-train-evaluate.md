@@ -1,6 +1,6 @@
 # 06 — Treino, Vetorização e Avaliação (camada `train/` + `evaluate/`)
 
-**Status:** Proposta · **Versão da spec:** `tn-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `tn-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §4.4](../../data-structure/data-model.md) (campos `algorithm`, `metrics`, `feature_spec_version` do manifesto) — este documento diz **como** o candidato é ajustado e **como** decide-se se ele merece virar uma `model_version`.
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (regressão, saída recortada `[-1, 1]`, sem T6), [ADR-0002](../../decisions/ADR-0002-origem-do-ground-truth.md) (métricas sobre corpus sintético são otimistas), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (pipeline `T1→T2→T3→Ridge`, abordagem A primeiro); [constitution.md](../../decisions/constitution.md) P3, P4, P5; [05-split.md](05-split.md) (portão do dataset)
 **Consumido por:** `registry/registry.py` (spec 07) — só promove um candidato a `model_version` se `eval.json.gate.passed == true`

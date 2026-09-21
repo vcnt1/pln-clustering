@@ -1,6 +1,6 @@
 # 02 — Ingestão e Validação do Corpus (camada `ingest/`)
 
-**Status:** Proposta · **Versão da spec:** `ig-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `ig-1` · **Data:** 2026-09-20
 **Implementa:** [01-dataset-contract.md](01-dataset-contract.md) (`dc-1`) — este documento diz **como** validar o que aquele contrato **exige**.
 **Depende de:** [constitution.md](../../decisions/constitution.md) P1, P4, P5; ADR-001, ADR-002 ([00-decisoes.md](00-decisoes.md)); [ADR-0004](../../decisions/ADR-0004-retentativa-e-quarentena.md) (analogia da política de retentativa); [data-model.md §4.1](../../data-structure/data-model.md)
 **Consumido por:** [labels/build.py](../labels/build.py) (T4, spec 03), [transform/](../transform/) (T1–T3, spec 04), [pipeline.py](../pipeline.py) (spec 09)

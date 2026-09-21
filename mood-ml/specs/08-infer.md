@@ -1,6 +1,6 @@
 # 08 — Serviço de Inferência Online (camada `infer/`)
 
-**Status:** Proposta · **Versão da spec:** `if-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `if-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §2.2](../../data-structure/data-model.md) (`POST /internal/v1/infer` — `InferRequest`/`InferResponse`).
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`scale`, `mood_label = null`, recorte `[-1, 1]`), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (janela de 30 mensagens da conversa), [ADR-0004](../../decisions/ADR-0004-retentativa-e-quarentena.md) (sem retry no `mood-ml`, quarentena é do `mood-api`); [constitution.md](../../decisions/constitution.md) P1, P3, P4, P5; [04-transform.md](04-transform.md) (`extract_features`), [06-train-evaluate.md](06-train-evaluate.md) (`clip_score`), [07-registry.md](07-registry.md) (`active.json`, `manifest.json`)
 **Consumido por:** `mood-api` (fora deste repositório de especificação — cliente HTTP interno)

@@ -1,6 +1,6 @@
 # 05 — Reconstrução de Janela, Montagem de Exemplos e Split (camada `transform/split.py`, T5 offline)
 
-**Status:** Proposta · **Versão da spec:** `sp-1` · **Data:** 2026-09-20
+**Status:** Aceita · **Versão da spec:** `sp-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §4.3](../../data-structure/data-model.md) (tabela `datasets/<dataset_id>/`) — este documento diz **como** o corpus validado e o label set viram o dataset que o treino consome.
 **Depende de:** [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (janela de 30 mensagens da conversa), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (dois blocos, `dataset_id` compartilhado entre abordagens); [constitution.md](../../decisions/constitution.md) P2, P4, P5; [02-ingest-validate.md](02-ingest-validate.md) (portão do corpus, `load_corpus()`); [03-labels.md](03-labels.md) (portão do label set); [04-transform.md](04-transform.md) (`extract_features`, único ponto de montagem)
 **Consumido por:** `train/train.py` (spec 06)
