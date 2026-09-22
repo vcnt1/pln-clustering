@@ -9,3 +9,4 @@ scipy
 pyyaml
 pytest
 ruff
+httpx

@@ -282,3 +282,39 @@ def train_config() -> dict:
         },
         "evaluate": {"quality_gate": {"max_mae_ratio": 0.9}},
     }
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 (infer) — encadeia as funções reais das Fases 2-3 até produzir um
+# models/active.json de verdade, pronto para create_app(models_dir=...) apontar.
+# ---------------------------------------------------------------------------
+
+
+def register_active_model(directory: Path, dataset_id: str, config: dict, signal: str = "strong") -> str:
+    """build_synthetic_dataset -> train_and_stage -> evaluate_staging ->
+    registry.register_model (grava model.joblib/manifest.json de verdade) ->
+    registry.promote_model (grava active.json). Devolve o model_version
+    promovido."""
+    from registry.registry import _copy_atomic as _copy_model_joblib
+    from registry.registry import _write_json_atomic as _write_registry_json
+    from registry.registry import register_model
+
+    build_synthetic_dataset(directory, dataset_id, signal=signal)
+    train_and_stage(directory, dataset_id, config)
+    eval_json = evaluate_staging(directory, dataset_id, config)
+
+    result = register_model(
+        dataset_id,
+        eval_json["fingerprint"],
+        staging_dir=directory / "staging",
+        models_dir=directory / "models",
+        datasets_dir=directory / "datasets",
+    )
+    if not result.reused:
+        model_dir = directory / "models" / result.model_version
+        _copy_model_joblib(result.candidate_path, model_dir / "model.joblib", "test")
+        _write_registry_json(result.manifest, model_dir / "manifest.json", "test", "RG_R15_IO_FAILED")
+
+    active_json = {"model_version": result.model_version, "promoted_at": "2026-01-01T00:00:00.000Z"}
+    _write_registry_json(active_json, directory / "models" / "active.json", "test", "PM_R09_IO_FAILED")
+    return result.model_version
