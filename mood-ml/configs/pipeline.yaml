@@ -5,3 +5,22 @@ split:
   validation_ratio: 0.15
   test_ratio: 0.15
   seed: 42
+
+train:
+  algorithm: tfidf-ridge     # only implemented value; "embeddings-ridge" reserved (ADR-0008, abordagem C)
+  seed: 42
+  ridge:
+    alpha: 1.0
+    solver: lsqr              # deterministic; supports sparse TF-IDF features + intercept (cholesky does not)
+  tfidf_word:
+    ngram_range: [1, 2]
+  tfidf_char:
+    ngram_range: [2, 5]
+    analyzer: char_wb
+  context:
+    ngram_range: [1, 2]
+    weight: 0.5
+
+evaluate:
+  quality_gate:
+    max_mae_ratio: 0.9        # candidate needs MAE <= 0.9 x baseline MAE
