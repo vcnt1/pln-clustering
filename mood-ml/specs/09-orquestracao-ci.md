@@ -14,7 +14,7 @@ Três coisas, todas de colagem sobre camadas já prontas e testadas (specs 02–
 
 1. **Um ponto de entrada único**, `python -m pipeline <subcomando>`, com um subcomando por camada (`ingest`, `labels`, `split`, `train`, `evaluate`, `register`, `promote`) mais um subcomando de conveniência, `all`, que roda a cadeia inteira `ingest → labels → split → train → evaluate → register` de uma vez, sobre um corpus bruto.
 2. **Um `Makefile`** cujos alvos espelham 1:1 os subcomandos — não um caminho paralelo, só açúcar sintático sobre a mesma CLI.
-3. **Um workflow de CI** (GitHub Actions) que roda `ruff` + `pytest` + `make all` sobre a fixture de teste comitada (`tests/fixtures/sample.jsonl`, com `--skip-composition`) a cada `push`/`pull_request`.
+3. **Um workflow de CI** (GitHub Actions) que roda `ruff` + `pytest` + `make all` sobre a fixture de teste comitada (`tests/fixtures/sample_medium.jsonl`, com `--skip-composition`) a cada `push`/`pull_request`.
 
 O que esta spec **não** decide: nada sobre *como* cada camada valida, treina ou registra — isso já foi decidido e implementado pelas specs 02–07. O espaço de decisão real aqui é só **como encadear** essas camadas sem reescrever a lógica que elas já têm.
 
@@ -106,17 +106,17 @@ Mesma ordem de grandeza do MVP inteiro — dezenas de execuções de `all` ao lo
 
 ### 3.5 `Makefile`
 
-Um alvo por subcomando, repassando parâmetros via variáveis de `make`:
+Um alvo por subcomando, repassando parâmetros via variáveis de `make`. A variável do caminho do corpus é `CORPUS`, não `PATH` — correção descoberta durante a implementação: `PATH` colidiria com a variável de ambiente `PATH` (busca de executáveis do shell), que o GNU Make herda como valor *default* de uma make-variable de mesmo nome, tornando o alvo silenciosamente errado sempre que o operador esquecesse de passar `PATH=...` explicitamente:
 
 ```makefile
 ingest:
-	python -m pipeline ingest $(PATH) $(if $(SKIP_COMPOSITION),--skip-composition)
+	python -m pipeline ingest $(CORPUS) $(if $(SKIP_COMPOSITION),--skip-composition)
 
 labels:
-	python -m pipeline labels $(PATH)
+	python -m pipeline labels $(CORPUS)
 
 split:
-	python -m pipeline split $(PATH) --dataset-id $(DATASET)
+	python -m pipeline split $(CORPUS) --dataset-id $(DATASET)
 
 train:
 	python -m pipeline train $(DATASET)
@@ -131,7 +131,7 @@ promote:
 	python -m pipeline promote $(VERSION) $(if $(FORCE),--force)
 
 all:
-	python -m pipeline all $(PATH) $(if $(SKIP_COMPOSITION),--skip-composition)
+	python -m pipeline all $(CORPUS) $(if $(SKIP_COMPOSITION),--skip-composition)
 ```
 
 Nenhum alvo chama um módulo (`ingest.validate`, `train.train`, ...) diretamente — todos passam por `python -m pipeline`, um único ponto de entrada.
@@ -154,8 +154,10 @@ jobs:
       - pip install -r mood-ml/requirements.txt
       - ruff check .
       - pytest -q
-      - make all PATH=tests/fixtures/sample.jsonl SKIP_COMPOSITION=1
+      - make all CORPUS=data/raw/synthetic/syn-2026-01-02-a.jsonl SKIP_COMPOSITION=1  # cópia de tests/fixtures/sample_medium.jsonl, ver nota abaixo
 ```
+
+**Por que `sample_medium.jsonl`, não `sample.jsonl`.** Correção descoberta durante a implementação, verificada empiricamente antes de ser adotada: `tests/fixtures/sample.jsonl` (56 linhas, 6 clientes) é pequeno demais para o candidato bater a *baseline* de forma confiável — com um *split* de teste de só 6 linhas, o MAE do candidato (0.504) ficou a um triz do limite do *quality gate* (0.500), tornando o resultado do CI dependente de ruído estatístico, não de um sinal real de regressão. `sample_medium.jsonl` (40 clientes, já usado pelos testes de `split`/`train`/`evaluate` das Fases 2–3 pelo mesmo motivo — "*split.py's GroupShuffleSplit needs enough groups*") roda `all` de ponta a ponta sem esse problema (MAE 0.137, bem abaixo do limite). O `path` de entrada também precisa satisfazer IG-R02/IG-R03 (arquivo sob `data/raw/synthetic/<corpus_id>.jsonl`, nome batendo com o `corpus_id` embutido nas linhas) — `tests/fixtures/*.jsonl` não está nesse layout por design (são fixtures brutas, copiadas/renomeadas pelos testes que as usam, nunca alimentadas direto a `ingest.validate`); o passo de CI copia a fixture para `data/raw/synthetic/syn-2026-01-02-a.jsonl` antes de chamar `make all`.
 
 Só validação — nenhum artefato do `make all` de teste é publicado ou persistido além do log do próprio job (decisão do usuário, §8 D3): é um MVP acadêmico, sem infraestrutura de deploy ainda.
 
@@ -251,7 +253,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `pipeline.py` — mesma verificaçã
 
 **CI**
 - **PL-R11** O workflow de CI DEVE rodar em todo `push` e `pull_request` para `main`.
-- **PL-R12** O workflow de CI DEVE rodar, nesta ordem, `ruff check .`, `pytest -q`, e `make all` sobre `tests/fixtures/sample.jsonl` com a flag equivalente a `--skip-composition`.
+- **PL-R12** O workflow de CI DEVE rodar, nesta ordem, `ruff check .`, `pytest -q`, e `make all` sobre uma cópia de `tests/fixtures/sample_medium.jsonl` com a flag equivalente a `--skip-composition` (§3.6 explica a escolha desta fixture em vez de `sample.jsonl`).
 - **PL-R13** QUANDO qualquer um dos três passos do CI falhar, o workflow DEVE terminar com falha (*exit* não-zero do job).
 - **PL-R14** O CI DEVE NÃO publicar nem persistir nenhum artefato do `make all` de teste além do log do próprio job.
 
@@ -280,7 +282,7 @@ Não introduz nenhum código de erro novo — reaproveita o catálogo de cada ca
 - **CA-04** Corpus que reprova a validação de `ingest` (spec 02) → `all` para no passo 2, *exit* igual ao que `ingest.validate` devolveria sozinho, nenhum diretório em `data/datasets/` criado.
 - **CA-05** Dataset cujo candidato reprova o *quality gate* de `evaluate` (spec 06) → `all` para no passo 8/9, *exit* 5, `eval.json` gravado, nenhum `models/<model_version>/` criado.
 - **CA-06** *Fingerprint* recalculado por `all` (§2.2) é *byte-a-byte* igual ao gravado por `train` em `train_manifest.json.fingerprint` para a mesma corrida.
-- **CA-07** `make all PATH=tests/fixtures/sample.jsonl SKIP_COMPOSITION=1` → mesmo resultado de CA-02, usando a fixture de teste.
+- **CA-07** `make all CORPUS=data/raw/synthetic/syn-2026-01-02-a.jsonl SKIP_COMPOSITION=1` (cópia de `tests/fixtures/sample_medium.jsonl`) → mesmo resultado de CA-02, usando a fixture de teste.
 - **CA-08** Workflow de CI, rodado localmente via `act` ou inspecionado manualmente: `ruff check .`, `pytest -q`, `make all` sobre a fixture, nesta ordem; falha proposital em qualquer um dos três (ex.: quebrar um teste de propósito) faz o job falhar.
 - **CA-09** Teste de P1: nenhuma ocorrência de `duckdb`/`.duckdb` em `pipeline.py`.
 

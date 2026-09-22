@@ -1,0 +1,39 @@
+name: mood-ml CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["mood-ml/**"]
+  pull_request:
+    branches: [main]
+    paths: ["mood-ml/**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mood-ml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+
+      - name: Stage the fixture as an approved raw corpus (IG-R02/IG-R03)
+        run: |
+          mkdir -p data/raw/synthetic
+          cp tests/fixtures/sample_medium.jsonl data/raw/synthetic/syn-2026-01-02-a.jsonl
+
+      - name: Run the offline pipeline end-to-end on the test fixture
+        run: make all CORPUS=data/raw/synthetic/syn-2026-01-02-a.jsonl SKIP_COMPOSITION=1
