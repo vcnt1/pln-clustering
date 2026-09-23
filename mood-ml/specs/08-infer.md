@@ -13,7 +13,7 @@
 Um serviço HTTP (processo `mood-ml` separado do `mood-api`, README §"Arquitetura") que faz três coisas, nesta ordem de importância:
 
 1. **Carrega o modelo ativo uma vez, na subida, e confere que ele é compatível com o código antes de aceitar qualquer requisição** — a verificação de P4 (`feature_spec_version`, `history_window`, `history_scope`) que a `data-model.md §4.4` exige "no carregamento do modelo".
-2. **Aplica o contrato**: recebe `InferRequest`, valida contra `data-model.md §2.2` além do que a tipagem sozinha garante (papel das mensagens, consistência entre `trigger_message_id` e o último item de `history`), e devolve `InferResponse` no formato exato que o `mood-api` espera.
+2. **Aplica o contrato**: recebe `InferRequest`, valida contra `data-model.md §2.2` além do que a tipagem sozinha garante (papel das mensagens de `history`), e devolve `InferResponse` no formato exato que o `mood-api` espera.
 3. **Nunca inventa um score.** Esta é a única camada do pipeline cujo erro tem efeito imediato e visível para um cliente de verdade (via `mood-api` → `chat-app`) — e é aqui que P3 (*"nunca gravar score de fallback"*) se torna uma regra literal de cada resposta HTTP: toda falha é `4xx`/`5xx` com `{"error_code", "detail"}`, nunca um score calculado sobre um erro engolido.
 
 O que este documento **não** cobre: como o modelo foi treinado (specs 04–06) ou registrado (spec 07) — chega aqui como um fato consumado, `models/<model_version>/{manifest.json,model.joblib}` e `models/active.json` já prontos.
@@ -26,7 +26,7 @@ O que este documento **não** cobre: como o modelo foi treinado (specs 04–06) 
 mood-api                                    mood-ml (processo separado, main.py)
    │ POST /internal/v1/infer                        │
    │  {request_id, customer_id, conversation_id,     │
-   │   trigger_message_id, history: [...]}           │
+   │   history: [...]}                               │
    ├─────────────────────────────────────────────────►
    │                                                  │  modelo já carregado em memória
    │                                                  │  (na subida, uma vez — §2.2)
@@ -37,9 +37,9 @@ mood-api                                    mood-ml (processo separado, main.py)
    │                                        model.predict(...) → clip_score  [spec 06]
    │                                                  │
    │  {request_id, customer_id, conversation_id,      ▼
-   │   trigger_message_id, score, scale,     InferResponse
-   │   mood_label: null, model_version,               │
-   │   computed_at}                                   │
+   │   trigger_message_id (= history[-1].message_id), InferResponse
+   │   score, scale, mood_label: null, model_version,  │
+   │   computed_at}                                    │
    ◄─────────────────────────────────────────────────┤
 ```
 
@@ -64,7 +64,7 @@ Diferente de toda spec anterior, aqui a "carga" não é de dado, é de **modelo*
 |---|---|---|
 | 1 | Valida o corpo contra `InferRequest` (tipos, `history` com 1–30 itens) | `400 invalid_request` |
 | 2 | QUANDO em modo degradado (§2.2), responde antes de qualquer outra checagem | `503 ml_unavailable` |
-| 3 | Valida regras de negócio: todo item de `history` tem `role = "customer"`; `history[-1].message_id == trigger_message_id` | `400 invalid_history` |
+| 3 | Valida regra de negócio: todo item de `history` tem `role = "customer"` | `400 invalid_history` |
 | 4 | `extract_features(history)` (spec 04) — monta `text_clean`/`context_clean` | `500 internal_error` (não deveria acontecer se o passo 3 já validou a forma; ver §4.1) |
 | 5 | `model.predict(...)` sobre o `Pipeline` carregado | `500 internal_error` |
 | 6 | `clip_score(raw)` (spec 06) | — (função total, não levanta) |
@@ -95,12 +95,12 @@ Runtime: Python 3.12, `fastapi`, `uvicorn[standard]`, `pydantic`, `joblib`, `pan
 |---|---|---|
 | `request_id` | string (UUID) | — |
 | `customer_id`, `conversation_id` | string | — |
-| `trigger_message_id` | string (UUID) | DEVE ser igual a `history[-1].message_id` (§2.3, passo 3) |
-| `history` | lista de `HistoryMessage`, 1–30 itens | Todo item DEVE ter `role = "customer"` |
+| `history` | lista de `HistoryMessage`, 1–30 itens | Todo item DEVE ter `role = "customer"`. O mood-api acrescenta a mensagem disparadora por último, mesmo com timestamp atrasado; não há `trigger_message_id` separado no pedido |
 
 | Campo (`InferResponse`) | Tipo | Origem |
 |---|---|---|
-| `request_id`, `customer_id`, `conversation_id`, `trigger_message_id` | string | Eco do pedido |
+| `request_id`, `customer_id`, `conversation_id` | string | Eco do pedido |
+| `trigger_message_id` | string | `history[-1].message_id` do pedido |
 | `score` | number | `clip_score(model.predict(...))`, em `[-1.0, 1.0]` |
 | `scale` | string | Sempre `"-1 to 1"` |
 | `mood_label` | null | Sempre `null` (ADR-0001) |
@@ -136,7 +136,7 @@ Não há volumetria de requisições por segundo a estimar — o `README.md` já
 | `error_code` | HTTP | Quando |
 |---|---|---|
 | `invalid_request` | 400 | Corpo não corresponde a `InferRequest` (Pydantic) |
-| `invalid_history` | 400 | `history` viola regra de negócio: papel errado, ou `trigger_message_id` não bate com o último item |
+| `invalid_history` | 400 | `history` viola regra de negócio: papel errado |
 | `ml_unavailable` | 503 | Serviço em modo degradado (§2.2) |
 | `internal_error` | 500 | Exceção não esperada em `extract_features`/`predict` |
 
@@ -217,11 +217,11 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 **Contrato HTTP**
 - **IF-R06** `POST /internal/v1/infer` DEVE validar o corpo contra `InferRequest`; violação estrutural DEVE devolver `400 invalid_request` no formato `{"error_code","detail"}` (nunca o corpo padrão do FastAPI).
 - **IF-R07** QUANDO o serviço estiver em modo degradado, toda chamada a `/infer` DEVE devolver `503 ml_unavailable` antes de qualquer outra validação.
-- **IF-R08** QUANDO algum item de `history` tiver `role != "customer"`, ou `history[-1].message_id != trigger_message_id`, o endpoint DEVE devolver `400 invalid_history`.
+- **IF-R08** QUANDO algum item de `history` tiver `role != "customer"`, o endpoint DEVE devolver `400 invalid_history`.
 - **IF-R09** QUANDO `extract_features` ou a predição levantarem exceção, o endpoint DEVE devolver `500 internal_error`.
 - **IF-R10** O endpoint DEVE NUNCA devolver um `score` calculado a partir de um erro capturado, nem um valor padrão/neutro.
 - **IF-R11** `score` DEVE passar por `clip_score` antes de compor a resposta.
-- **IF-R12** `InferResponse` DEVE ecoar `request_id`, `customer_id`, `conversation_id`, `trigger_message_id` do pedido, sem alteração.
+- **IF-R12** `InferResponse` DEVE ecoar `request_id`, `customer_id`, `conversation_id` do pedido, sem alteração, e `trigger_message_id` DEVE ser `history[-1].message_id`.
 - **IF-R13** `mood_label` DEVE ser sempre `null`.
 - **IF-R14** `model_version` na resposta DEVE ser o do modelo carregado na subida — nunca um valor fixo no código, nunca `"untrained"`.
 
@@ -269,13 +269,12 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 - **CA-03** `active.json` aponta para `model_version` sem `manifest.json` → processo não conclui a subida (teste instancia o app e espera falha).
 - **CA-04** `manifest.json` com `history_window: 1` (valor antigo/incompatível) → processo não conclui a subida.
 - **CA-05** `history` com algum item `role: "agent"` → `400 invalid_history`.
-- **CA-06** `trigger_message_id` diferente de `history[-1].message_id` → `400 invalid_history`.
-- **CA-07** Corpo sem `history` → `400 invalid_request`, corpo `{"error_code","detail"}` (não o formato padrão do FastAPI).
-- **CA-08** Duas chamadas idênticas (mesma `history`) → mesmo `score`, byte a byte no JSON de resposta exceto `computed_at`.
-- **CA-09** `extract_features` forçada a levantar exceção (teste com *mock*) → `500 internal_error`, nunca um `score` no corpo.
-- **CA-10** Medição local de latência sobre N requisições sintéticas com janela de 30 itens → p95 < 200ms.
-- **CA-11** Bateria de requisições com PII sintética em `history[].text` → nenhuma ocorrência do texto bruto nos logs gerados.
-- **CA-12** Teste de P1: nenhuma ocorrência de `duckdb`/`.duckdb` em `infer/`.
+- **CA-06** Corpo sem `history` → `400 invalid_request`, corpo `{"error_code","detail"}` (não o formato padrão do FastAPI).
+- **CA-07** Duas chamadas idênticas (mesma `history`) → mesmo `score`, byte a byte no JSON de resposta exceto `computed_at`.
+- **CA-08** `extract_features` forçada a levantar exceção (teste com *mock*) → `500 internal_error`, nunca um `score` no corpo.
+- **CA-09** Medição local de latência sobre N requisições sintéticas com janela de 30 itens → p95 < 200ms.
+- **CA-10** Bateria de requisições com PII sintética em `history[].text` → nenhuma ocorrência do texto bruto nos logs gerados.
+- **CA-11** Teste de P1: nenhuma ocorrência de `duckdb`/`.duckdb` em `infer/`.
 
 ## 10. Fora de escopo
 
@@ -291,13 +290,13 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 - [ ] `main.py` — `lifespan`/evento de subida do FastAPI chamando o carregamento do modelo (IF-R01 a IF-R05)
 - [ ] Verificação de compatibilidade P4 contra constantes do código (`feature_spec_version`, `history_window`, `history_scope`, `algorithm` suportados)
 - [ ] Retentativa de I/O na subida (IF-R19)
-- [ ] `POST /internal/v1/infer` — validação estrutural (`InferRequest`) e de negócio (papel, `trigger_message_id`) (IF-R06 a IF-R09)
+- [ ] `POST /internal/v1/infer` — validação estrutural (`InferRequest`) e de negócio (papel de cada item de `history`) (IF-R06 a IF-R09)
 - [ ] Manipulador de exceção único para o formato `{"error_code","detail"}` (D5)
 - [ ] Integração com `extract_features` (spec 04) e o `Pipeline` carregado; `clip_score` (spec 06) antes da resposta (IF-R09 a IF-R14)
 - [ ] `GET /internal/v1/healthz` (IF-R15, D4)
 - [ ] Log estruturado JSON por evento de subida e por requisição (§5), sem `history[].text` em nenhum caminho (IF-R20)
 - [ ] Testes de contrato para os três desfechos de subida (CA-02 a CA-04)
-- [ ] Testes de validação de negócio (CA-05, CA-06)
-- [ ] Teste de determinismo (CA-08) e de ausência de score em erro (CA-09)
-- [ ] Teste de latência sintético (CA-10)
-- [ ] Testes `tests/unit/` e `tests/contract/` cobrindo CA-01 a CA-12
+- [ ] Teste de validação de negócio (CA-05)
+- [ ] Teste de determinismo (CA-07) e de ausência de score em erro (CA-08)
+- [ ] Teste de latência sintético (CA-09)
+- [ ] Testes `tests/unit/` e `tests/contract/` cobrindo CA-01 a CA-11

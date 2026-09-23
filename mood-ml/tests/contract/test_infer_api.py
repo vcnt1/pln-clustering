@@ -20,13 +20,12 @@ def _history_item(i: int, role: str = "customer") -> dict:
     }
 
 
-def _payload(n_history: int = 1, trigger_message_id: str | None = None) -> dict:
+def _payload(n_history: int = 1) -> dict:
     history = [_history_item(i) for i in range(n_history)]
     return {
         "request_id": "req-001",
         "customer_id": "cust-001",
         "conversation_id": "conv-001",
-        "trigger_message_id": trigger_message_id or history[-1]["message_id"],
         "history": history,
     }
 
@@ -109,16 +108,16 @@ def test_ca05_history_item_with_wrong_role_returns_400(corpus_root: Path, train_
     assert resp.json()["error_code"] == "invalid_history"
 
 
-def test_ca06_trigger_message_id_mismatch_returns_400(corpus_root: Path, train_config: dict) -> None:
+def test_ca06_trigger_message_id_is_derived_from_last_history_item(corpus_root: Path, train_config: dict) -> None:
     register_active_model(corpus_root, "ds-e", train_config)
     app = create_app(models_dir=corpus_root / "models")
-    payload = _payload(trigger_message_id="not-the-last-message-id")
+    payload = _payload(n_history=2)
 
     with TestClient(app) as client:
         resp = client.post("/internal/v1/infer", json=payload)
 
-    assert resp.status_code == 400
-    assert resp.json()["error_code"] == "invalid_history"
+    assert resp.status_code == 200
+    assert resp.json()["trigger_message_id"] == payload["history"][-1]["message_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +138,18 @@ def test_ca07_missing_history_field_returns_custom_error_shape(corpus_root: Path
     body = resp.json()
     assert set(body.keys()) == {"error_code", "detail"}
     assert body["error_code"] == "invalid_request"
+
+
+def test_invalid_request_does_not_echo_message_text(tmp_path: Path) -> None:
+    app = create_app(models_dir=tmp_path / "models")
+    payload = _payload()
+    payload["history"][0]["text"] = ["PRIVATE_PHONE_123456"]
+
+    with TestClient(app) as client:
+        resp = client.post("/internal/v1/infer", json=payload)
+
+    assert resp.status_code == 400
+    assert "PRIVATE_PHONE_123456" not in resp.text
 
 
 # ---------------------------------------------------------------------------

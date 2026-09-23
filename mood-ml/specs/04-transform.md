@@ -77,7 +77,7 @@ Não há arquivo próprio desta camada — "formato de dados" aqui significa o *
 | `clean_message` | `text: str` | `str` (nunca vazio se a entrada não for vazia — TR-R05) |
 | `mask_pii` | `text: str` | `str` |
 | `count_pii` | `text: str` | `dict[str, int]` — chaves `"cpf"`, `"phone"`, `"email"` |
-| `extract_features` | `history: list[dict]` (esquema `HistoryMessage`: `message_id`, `role`, `text`, `sent_at`) | `dict` com `"text_clean": str` e `"context_clean": list[str]` |
+| `extract_features` | `history: list[dict]` (esquema `HistoryMessage`: `message_id`, `role`, `text`) | `dict` com `"text_clean": str` e `"context_clean": list[str]` |
 
 Quem grava em disco é sempre o chamador: `transform/split.py` escreve `text_clean`/`context_clean` em `datasets/<dataset_id>/*.parquet` (spec 05); `infer/predict.py` passa o resultado direto para o `Pipeline` do `model.joblib` (spec 08), sem persistir nada.
 

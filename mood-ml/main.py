@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from infer.predict import (
     FeatureSpecMismatchError,
@@ -61,11 +61,11 @@ def create_app(models_dir: str | Path = Path("models")) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _invalid_request_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-        # D5: o corpo padrão do FastAPI para erro de validação ({"detail":
-        # [...]}) não segue {"error_code","detail"}; reescrito aqui, no único
-        # ponto de serialização de erro estrutural (reforça IF-R20: nunca
-        # repr(request) bruto, só a mensagem de validação do Pydantic).
-        return JSONResponse(status_code=400, content={"error_code": "invalid_request", "detail": str(exc)})
+        return JSONResponse(status_code=400, content={"error_code": "invalid_request", "detail": "invalid request body"})
+
+    @app.get("/openapi.yaml", include_in_schema=False)
+    def openapi_yaml() -> FileResponse:
+        return FileResponse(Path(__file__).resolve().parent / "openapi.yaml", media_type="application/yaml")
 
     app.include_router(infer_router, prefix="/internal/v1")
     return app

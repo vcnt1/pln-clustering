@@ -1,0 +1,178 @@
+openapi: 3.1.0
+info:
+  title: mood-ml
+  description: |
+    Stateless online inference service. Computes a mood score for the last
+    customer message of a conversation from up to 30 prior `customer`
+    messages of that same conversation (ADR-0007). Internal service, called
+    synchronously by mood-api during ingest of `customer`-role messages
+    (specs/08-infer.md). Never authenticates or authorizes callers itself —
+    that is expected to happen in front of it (README, "ainda não definida").
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8001
+    description: Local development
+tags:
+  - name: inference
+    description: Computing a mood score for a conversation
+  - name: health
+    description: Process/model liveness
+paths:
+  /internal/v1/infer:
+    post:
+      tags: [inference]
+      summary: Compute a mood score from conversation history
+      description: |
+        Applies feature extraction (spec 04) and the loaded model's pipeline
+        (spec 06) to `history`, clips the result to [-1, 1], and returns it.
+        The trigger message is always `history[-1]` (mood-api appends the
+        message being ingested after the earlier context). Never returns
+        a fallback/neutral score on error (P3) — every failure is a 4xx/5xx
+        with `{"error_code", "detail"}` instead.
+      operationId: inferMood
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InferRequest'
+            examples:
+              singleMessage:
+                summary: A conversation with a single customer message
+                value:
+                  request_id: 8f14e45f-ceea-4c5a-8b8f-8e3d6e6a0c1b
+                  customer_id: cust-456
+                  conversation_id: conv-123
+                  history:
+                    - message_id: msg-789
+                      role: customer
+                      text: "O wifi do quarto não está funcionando."
+      responses:
+        '200':
+          description: Mood score computed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InferResponse'
+        '400':
+          description: Malformed body, or a history item has the wrong role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '500':
+          description: Unexpected failure computing the score (feature extraction or prediction)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '503':
+          description: No active model is loaded (degraded mode, spec 08 §2.2)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+  /internal/v1/healthz:
+    get:
+      tags: [health]
+      summary: Report whether a model is loaded
+      description: >-
+        Cheap liveness check that does not trigger an inference. Does not
+        replace the offline audit reports of the training/registry specs.
+      operationId: healthz
+      responses:
+        '200':
+          description: Process is up; body distinguishes serving from degraded mode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+components:
+  schemas:
+    HistoryMessage:
+      type: object
+      required: [message_id, role, text]
+      properties:
+        message_id:
+          type: string
+        role:
+          type: string
+          enum: [customer, agent]
+          description: Every item in InferRequest.history must be `customer` (IF-R08)
+        text:
+          type: string
+    InferRequest:
+      type: object
+      required: [request_id, customer_id, conversation_id, history]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+        conversation_id:
+          type: string
+        history:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items:
+            $ref: '#/components/schemas/HistoryMessage'
+          description: >-
+            Up to 30 prior `customer` messages of the conversation (ADR-0007),
+            context ordered by timestamp. The last item is always the trigger
+            message, appended by mood-api even if its timestamp is backdated
+    InferResponse:
+      type: object
+      required: [request_id, customer_id, conversation_id, trigger_message_id, score, scale, model_version, computed_at]
+      properties:
+        request_id:
+          type: string
+          description: Echoed from the request
+        customer_id:
+          type: string
+          description: Echoed from the request
+        conversation_id:
+          type: string
+          description: Echoed from the request
+        trigger_message_id:
+          type: string
+          description: Echoed as history[-1].message_id, not a separate request field
+        score:
+          type: number
+          format: double
+          minimum: -1
+          maximum: 1
+          description: clip_score(model.predict(...)) (spec 06)
+        scale:
+          type: string
+          example: "-1 to 1"
+        mood_label:
+          type: [string, "null"]
+          description: Always null in the MVP (ADR-0001)
+        model_version:
+          type: string
+          example: mood-2026.09.0
+          description: Version of the model loaded at process startup, never a fixed/placeholder value
+        computed_at:
+          type: string
+          format: date-time
+    HealthResponse:
+      type: object
+      required: [status, model_version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        model_version:
+          type: [string, "null"]
+          example: mood-2026.09.0
+    ErrorDetail:
+      type: object
+      required: [error_code, detail]
+      properties:
+        error_code:
+          type: string
+          enum: [invalid_request, invalid_history, ml_unavailable, internal_error]
+        detail:
+          type: string

@@ -39,14 +39,12 @@ class HistoryMessage(BaseModel):
     role: str  # não Literal["customer"]: uma role diferente é regra de negócio
     #            (IF-R08, 400 invalid_history), não violação estrutural (400 invalid_request).
     text: str
-    sent_at: datetime
 
 
 class InferRequest(BaseModel):
     request_id: str
     customer_id: str
     conversation_id: str
-    trigger_message_id: str
     history: list[HistoryMessage] = Field(min_length=1, max_length=30)
 
 
@@ -195,7 +193,11 @@ def run_inference(pipeline: Any, history: list[HistoryMessage]) -> float:
     mascarado — mask_pii é idempotente (spec 04). Nenhum I/O (IF-R18)."""
     items = [{"role": item.role, "text": item.text} for item in history]
     features = extract_features(items)
-    row = pd.DataFrame([{"text_clean": features["text_clean"], "context_clean": features["context_clean"]}])
+    row = pd.DataFrame([{
+        "text_clean": features["text_clean"],
+        "context_clean": features["context_clean"],
+        "context_text": " ".join(features["context_clean"]),
+    }])
     raw = pipeline.predict(row)[0]
     return clip_score(raw)
 
@@ -223,15 +225,9 @@ async def infer_mood(payload: InferRequest, request: Request) -> InferResponse |
         return JSONResponse(status_code=503, content={"error_code": "ml_unavailable", "detail": "no active model loaded"})
 
     # Passo 3: regras de negócio (IF-R08).
-    last = payload.history[-1]
     invalid_role = any(item.role != "customer" for item in payload.history)
-    trigger_mismatch = last.message_id != payload.trigger_message_id
-    if invalid_role or trigger_mismatch:
-        detail = (
-            "history item has role != 'customer'"
-            if invalid_role
-            else "trigger_message_id does not match history[-1].message_id"
-        )
+    if invalid_role:
+        detail = "history item has role != 'customer'"
         _log(
             logging.WARNING,
             "request_rejected",
@@ -272,7 +268,7 @@ async def infer_mood(payload: InferRequest, request: Request) -> InferResponse |
         request_id=payload.request_id,
         customer_id=payload.customer_id,
         conversation_id=payload.conversation_id,
-        trigger_message_id=payload.trigger_message_id,
+        trigger_message_id=payload.history[-1].message_id,
         score=score,
         scale="-1 to 1",
         mood_label=None,

@@ -23,6 +23,13 @@ def extract_features(history: list[dict]) -> dict:
     return {"text_clean": cleaned[-1], "context_clean": cleaned[:-1]}
 
 
+def features_to_row(features: dict) -> dict:
+    return {
+        "text_clean": features["text_clean"],
+        "context_text": " ".join(features["context_clean"]),
+    }
+
+
 def join_context_list(column: Any) -> list[str]:
     """Joins each row's context_clean list into a single string (space
     separator, "" if empty). Lives inside the serialized train.train Pipeline
