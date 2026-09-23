@@ -153,7 +153,7 @@ def _code_commit() -> str:
             timeout=5,
         )
         return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return "unknown"
 
 
