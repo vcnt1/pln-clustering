@@ -28,6 +28,20 @@ VALID_LABELS = {-1.0, -0.5, 0.0, 0.5, 1.0}
 REPORT_VERSION = "lb-1"
 IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 
+# Explicit schema (LB-R07, spec §3.2): keeps `annotator` typed as string even while all-null.
+LABEL_SCHEMA = pa.schema(
+    [
+        pa.field("label_set_id", pa.string(), nullable=False),
+        pa.field("target_type", pa.string(), nullable=False),
+        pa.field("target_id", pa.string(), nullable=False),
+        pa.field("label_score", pa.float64(), nullable=False),
+        pa.field("scale", pa.string(), nullable=False),
+        pa.field("label_source", pa.string(), nullable=False),
+        pa.field("annotator", pa.string(), nullable=True),
+        pa.field("labeled_at", pa.string(), nullable=False),
+    ]
+)
+
 logger = logging.getLogger("labels.build")
 
 _GATE_REASON_TO_CODE = {
@@ -97,7 +111,9 @@ def _build_label_rows(customer_messages: list, label_set_id: str) -> list[dict[s
 
 
 def build_labels(
-    corpus_path: str | Path, report_dir: str | Path = Path("data/reports")
+    corpus_path: str | Path,
+    report_dir: str | Path = Path("data/reports"),
+    run_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Returns (label_rows, meta). Writes nothing; does not decide an exit
     code (see specs/03-labels.md — same separation as ingest.validate_corpus)."""
@@ -106,11 +122,13 @@ def build_labels(
     report_dir = Path(report_dir)
 
     try:
-        ingest_report = check_ingest_gate(corpus_path, report_dir)
+        ingest_report = _with_io_retry(
+            "read_ingest_report", lambda: check_ingest_gate(corpus_path, report_dir), run_id
+        )
     except IngestGateError as exc:
         raise LabelGateError(_GATE_REASON_TO_CODE[exc.reason], exc.detail) from exc
 
-    messages = load_corpus(corpus_path)
+    messages = _with_io_retry("read_corpus", lambda: load_corpus(corpus_path), run_id)
     customer_messages = [m for m in messages if m.role == "customer"]
     label_set_id = f"ls-{corpus_id}"
 
@@ -153,11 +171,11 @@ def build_labels(
 
 
 def _write_parquet_atomic(rows: list[dict[str, Any]], dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
 
     def _write() -> None:
-        table = pa.Table.from_pylist(rows)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.Table.from_pylist(rows, schema=LABEL_SCHEMA)
         pq.write_table(table, tmp)
         os.replace(tmp, dest)
 
@@ -165,10 +183,10 @@ def _write_parquet_atomic(rows: list[dict[str, Any]], dest: Path, run_id: str) -
 
 
 def _write_report_atomic(report: dict[str, Any], dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
 
     def _write() -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, sort_keys=True, ensure_ascii=False)
         os.replace(tmp, dest)
@@ -241,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     _log(logging.INFO, "build_started", run_id=run_id, corpus_path=str(corpus_path))
 
     try:
-        rows, meta = build_labels(corpus_path, args.report_dir)
+        rows, meta = build_labels(corpus_path, args.report_dir, run_id=run_id)
     except LabelGateError as exc:
         _log(logging.ERROR, "gate_blocked", run_id=run_id, reason=exc.code, detail=exc.detail)
         return 3
@@ -284,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         _write_parquet_atomic(rows, parquet_path, run_id)
-        parquet_sha256, _ = sha256_and_size(parquet_path)
+        parquet_sha256, _ = _with_io_retry("hash_label_set", lambda: sha256_and_size(parquet_path), run_id)
 
         label_levels = Counter(row["label_score"] for row in rows)
         finished_at = datetime.now(timezone.utc)
@@ -323,6 +341,9 @@ def main(argv: list[str] | None = None) -> int:
         _write_report_atomic(report, report_path, run_id)
     except LabelIOError as exc:
         _log(logging.ERROR, "io_failed", run_id=run_id, detail=exc.detail)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - deliberate catch-all for INTERNAL_ERROR (exit 1)
+        _log(logging.ERROR, "internal_error", run_id=run_id, exc_type=type(exc).__name__, detail=str(exc))
         return 1
 
     _log(

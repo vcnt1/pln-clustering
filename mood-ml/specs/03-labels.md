@@ -302,7 +302,7 @@ Formato da spec 01/02: **QUANDO** condição, o script **DEVE** ação.
 | `LB_R10_ROW_COUNT_MISMATCH` | LB-R10 | F4 |
 | `LB_R11_LABEL_SCORE_OUT_OF_DOMAIN` | LB-R11 | F4 |
 | `LB_R11_DUPLICATE_TARGET_ID` | LB-R11 | F4 |
-| `LB_R14_IO_FAILED` | LB-R14 | F2/F5 |
+| `LB_R14_IO_FAILED` | LB-R14 | F1/F2/F5 |
 | `INTERNAL_ERROR` | — | qualquer |
 
 ## 8. Decisões deste documento

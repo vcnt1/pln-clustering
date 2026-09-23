@@ -148,3 +148,94 @@ def test_no_text_anywhere_in_output(corpus_root: Path, sample_jsonl_path: Path) 
     output_blob = str(rows) + str(meta)
     for text in corpus_texts:
         assert text not in output_blob
+
+
+# ---------------------------------------------------------------------------
+# LB-R07 — explicit Parquet schema
+# ---------------------------------------------------------------------------
+
+
+def test_parquet_schema_is_explicit_with_string_annotator(corpus_root: Path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from labels.build import LABEL_SCHEMA, main
+
+    path = approved_sample_corpus(corpus_root)
+    labels_dir = corpus_root / "labels"
+    code = main([str(path), "--report-dir", str(corpus_root / "reports"), "--labels-dir", str(labels_dir)])
+
+    assert code == 0
+    schema = pq.read_schema(labels_dir / "ls-syn-2026-01-01-a.parquet")
+    assert schema.remove_metadata() == LABEL_SCHEMA
+    assert schema.field("annotator").type == pa.string()
+
+
+# ---------------------------------------------------------------------------
+# LB-R14 — I/O retry on reads (gate + corpus) and after the write
+# ---------------------------------------------------------------------------
+
+
+def _flaky(real, failures: int):
+    """Wraps `real` so its first `failures` calls raise OSError."""
+    calls = {"n": 0}
+
+    def _wrapped(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise OSError(5, "simulated I/O error")
+        return real(*args, **kwargs)
+
+    return _wrapped
+
+
+@pytest.mark.parametrize("target", ["check_ingest_gate", "load_corpus"])
+def test_read_is_retried_on_transient_oserror(
+    corpus_root: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import labels.build as labels_build
+
+    path = approved_sample_corpus(corpus_root)
+    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(labels_build, target, _flaky(getattr(labels_build, target), failures=2))
+
+    rows, _ = build_labels(path, report_dir=corpus_root / "reports")
+    assert len(rows) == 30
+
+
+@pytest.mark.parametrize("target", ["check_ingest_gate", "load_corpus"])
+def test_read_exhausting_retries_exits_1_with_io_failed(
+    corpus_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, target: str
+) -> None:
+    import labels.build as labels_build
+
+    path = approved_sample_corpus(corpus_root)
+    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(labels_build, target, _flaky(getattr(labels_build, target), failures=99))
+
+    with pytest.raises(labels_build.LabelIOError):
+        build_labels(path, report_dir=corpus_root / "reports")
+
+    code = labels_build.main(
+        [str(path), "--report-dir", str(corpus_root / "reports"), "--labels-dir", str(corpus_root / "labels")]
+    )
+    assert code == 1
+    assert '"event": "io_failed"' in capsys.readouterr().err
+
+
+def test_post_write_oserror_exits_1_instead_of_escaping_main(
+    corpus_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import labels.build as labels_build
+
+    path = approved_sample_corpus(corpus_root)
+    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(labels_build, "sha256_and_size", _flaky(labels_build.sha256_and_size, failures=99))
+
+    code = labels_build.main(
+        [str(path), "--report-dir", str(corpus_root / "reports"), "--labels-dir", str(corpus_root / "labels")]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert '"event": "io_failed"' in err
+    assert "hash_label_set" in err

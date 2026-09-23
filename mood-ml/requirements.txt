@@ -4,7 +4,7 @@ pydantic
 scikit-learn
 pandas
 joblib
-pyarrow
+pyarrow==25.0.1
 scipy
 pyyaml
 pytest
