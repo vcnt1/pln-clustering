@@ -1,0 +1,185 @@
+openapi: 3.1.0
+info:
+  title: mood-api
+  description: |
+    Ingests chat messages and exposes the latest computed customer mood score.
+    mood-api is the single writer of the operational DuckDB store and the only
+    service that calls mood-ml (the stateless inference service), synchronously,
+    during ingest of `customer`-role messages.
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8000
+    description: Local development
+tags:
+  - name: messages
+    description: Ingesting chat messages
+  - name: mood
+    description: Reading the computed mood score
+paths:
+  /v1alpha1/ingest:
+    post:
+      tags: [messages]
+      summary: Ingest a chat message
+      description: |
+        Stores a message. When `role` is `customer`, mood-api synchronously calls
+        mood-ml with the last 30 `customer` messages of the conversation
+        (ADR-0007) and persists the resulting mood score. `agent` messages are
+        stored but never trigger inference. An `agent` message can never start a
+        new conversation (ADR-0006).
+      operationId: ingestMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+            examples:
+              customerMessage:
+                summary: A customer message that triggers inference
+                value:
+                  conversation_id: conv-123
+                  customer_id: cust-456
+                  role: customer
+                  message: "O wifi do quarto não está funcionando."
+                  timestamp: "2026-09-23T12:00:00Z"
+              agentReply:
+                summary: An agent reply (does not affect mood)
+                value:
+                  conversation_id: conv-123
+                  customer_id: cust-456
+                  role: agent
+                  message: "Vamos verificar o wifi agora mesmo!"
+                  timestamp: "2026-09-23T12:01:00Z"
+      responses:
+        '200':
+          description: Message stored (and inference triggered, if role=customer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestResponse'
+        '400':
+          description: Malformed payload, empty message, missing timezone, or customer/conversation mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '413':
+          description: Message exceeds the maximum length (1000 characters)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '422':
+          description: An agent message tried to start a new conversation (ADR-0006)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+  /v1alpha1/customer/{customer_id}/mood:
+    get:
+      tags: [mood]
+      summary: Get a customer's latest computed mood
+      description: |
+        Returns the most recent successfully computed mood score for the
+        customer, derived from the append-only `mood_scores` table
+        (`v_customer_mood_latest`). Never returns a placeholder/neutral score;
+        404 means no successful inference has ever completed for this customer.
+      operationId: getCustomerMood
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Customer identifier
+      responses:
+        '200':
+          description: Latest mood score for the customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoodResponse'
+        '404':
+          description: No mood has ever been computed for this customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+components:
+  schemas:
+    IngestRequest:
+      type: object
+      required: [conversation_id, customer_id, role, message, timestamp]
+      properties:
+        conversation_id:
+          type: string
+          description: Identifier of the conversation this message belongs to
+        customer_id:
+          type: string
+          description: >-
+            Identifier of the customer who owns the conversation. Required even
+            though `conversation_id` is also required: it is the only way to
+            attribute a brand-new conversation to a customer, and is
+            cross-checked against the conversation's owner on every later
+            message (mismatches are rejected with 400)
+        role:
+          type: string
+          enum: [customer, agent]
+          description: Only `customer` messages trigger mood inference
+        message:
+          type: string
+          maxLength: 1000
+          description: Raw message text
+        timestamp:
+          type: string
+          format: date-time
+          description: Must include a timezone offset; stored internally as UTC
+    IngestResponse:
+      type: object
+      required: [status, message_id]
+      properties:
+        status:
+          type: string
+          example: ok
+        message_id:
+          type: string
+          format: uuid
+    MoodResponse:
+      type: object
+      required: [customer_id, conversation_id, score, scale, model_version, computed_at]
+      properties:
+        customer_id:
+          type: string
+        conversation_id:
+          type: string
+          description: >-
+            Conversation the score was computed for; apply the score only to
+            the conversation it belongs to (data-model.md §7)
+        score:
+          type: number
+          format: double
+          minimum: -1
+          maximum: 1
+          description: Continuous mood score (ADR-0001)
+        scale:
+          type: string
+          example: "-1 to 1"
+        mood_label:
+          type: [string, "null"]
+          description: Always null in the MVP (ADR-0001, no discrete labels yet)
+        model_version:
+          type: string
+          example: mood-2026.09.0
+        computed_at:
+          type: string
+          format: date-time
+    ErrorDetail:
+      type: object
+      properties:
+        detail:
+          description: Human-readable error message; invalid request bodies receive a generic detail without submitted values
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object

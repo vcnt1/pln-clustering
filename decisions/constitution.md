@@ -78,7 +78,7 @@ serviço.
 
 ## P5 — Nenhum dado com PII sai do DuckDB
 
-`display_name` e qualquer texto não mascarado permanecem exclusivamente no
+Qualquer texto não mascarado (`messages.text`) permanece exclusivamente no
 banco operacional. Snapshots, datasets, manifestos, logs e
 `inference_failures.detail` não podem conter PII nem trechos de conversa.
 `customer_id` é sempre pseudônimo e nunca telefone ou e-mail em claro.
@@ -88,9 +88,9 @@ de ML são copiados, versionados e compartilhados com muito mais facilidade que
 um banco, e uma vez que o dado vaza para um `.parquet` não há como recolhê-lo.
 A política de retenção só é aplicável ao que está num lugar só.
 
-**Verificação:** o esquema exportado em snapshots exclui `display_name` por
-construção. `mood-api/data/`, `mood-ml/data/` e `mood-ml/models/` estão no
-`.gitignore`. Logs de erro carregam `message_id`, nunca `text`.
+**Verificação:** o esquema exportado em snapshots nunca inclui `text` sem
+mascaramento (T2). `mood-api/data/`, `mood-ml/data/` e `mood-ml/models/` estão
+no `.gitignore`. Logs de erro carregam `message_id`, nunca `text`.
 
 ---
 

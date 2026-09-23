@@ -23,7 +23,7 @@ Os princípios da [constituição](../decisions/constitution.md) são invioláve
 | **P2** — `mood_scores` é append-only | Sem `UPDATE`/`DELETE`; humor atual é derivado por view | 3.4, 3.7 |
 | **P3** — Nunca gravar score de fallback | Falha vira `inference_failures`; `model_version` de placeholder é rejeitada | 2.2, 3.6 |
 | **P4** — T1 e T3 idênticos no treino e na inferência | `feature_spec_version` e `history_window` no manifesto amarram o contrato de features | 4.4, 6 |
-| **P5** — Nenhum dado com PII sai do DuckDB | `display_name` fora de snapshots/datasets; `detail` sem texto de conversa; `customer_id` pseudônimo | 3.6, 4.2, 8 |
+| **P5** — Nenhum dado com PII sai do DuckDB | `detail` sem texto de conversa; `customer_id` pseudônimo | 3.6, 4.2, 8 |
 
 ADRs vigentes:
 
@@ -93,8 +93,8 @@ Contrato público definido no README. Os nomes dos campos são mantidos para nã
 | `role` | string | sim | `customer` \| `agent` | `messages.role` |
 | `message` | string | sim | não vazio; tamanho máximo gera `413` (limite em aberto) | `messages.text` |
 | `timestamp` | string ISO-8601 | sim | com timezone; normalizado para UTC | `messages.sent_at` |
-| `customer_name` | string | não | — | `customers.display_name` (**planejado**, campo novo e opcional) |
-| `client_message_id` | string | não | único por `conversation_id` | `messages.client_message_id` (**planejado**, para idempotência) |
+
+**Por que `customer_id` além de `conversation_id`?** Uma conversa nova não tem dono ainda: `conversation_id` sozinho não diz a qual cliente ela pertence na primeira mensagem, então `customer_id` é a única forma de atribuí-la. Em mensagens seguintes da mesma conversa, o campo é conferido contra `conversations.customer_id` e rejeitado com `400` se divergir — uma checagem de integridade barata contra um cliente errado escrevendo na conversa de outro.
 
 Respostas:
 
@@ -123,7 +123,6 @@ Contrato interno, não exposto ao frontend.
 | `request_id` | string (UUID) | Gerado pela API; permite rastrear a falha até a mensagem |
 | `customer_id` | string | — |
 | `conversation_id` | string | Conversa da mensagem disparadora |
-| `trigger_message_id` | string (UUID) | Mensagem que disparou a inferência (sempre `role = customer`) |
 | `history` | array de `HistoryMessage` | Janela de contexto (ver abaixo), ordem cronológica crescente, com a mensagem disparadora como último item. Tamanho entre 1 e 30 |
 
 `HistoryMessage`:
@@ -133,8 +132,9 @@ Contrato interno, não exposto ao frontend.
 | `message_id` | string | — |
 | `role` | string | `customer` \| `agent`. No MVP sempre `customer` |
 | `text` | string | Texto como persistido; mascarado ou não, conforme T2 (em aberto) |
-| `sent_at` | string ISO-8601 UTC | — |
 
+> **Sem `trigger_message_id` nem `sent_at` no contrato.** A mensagem disparadora é sempre `history[-1]`: o mood-api monta o contexto e acrescenta a mensagem que disparou o ingest por último, mesmo que seu timestamp esteja atrasado. Um campo separado duplicaria essa informação. `sent_at` foi removido por não ser consumido por `extract_features` (T3, spec 04) nem por nenhuma outra parte do `mood-ml`: o mood-api já ordena o contexto antes de montar o payload.
+>
 > **Decidido (ADR-0007) — janela de histórico (T5):** as **30 mensagens `customer` mais recentes da conversa** da mensagem disparadora. A janela **não atravessa** `conversation_id`: mensagens de outras conversas do mesmo cliente ficam de fora, mesmo sendo recentes. Mensagens `agent` **não entram**, e o filtro é aplicado **na API**, ao montar o `InferRequest` — em favor de P5 (menos PII em trânsito) e de um payload menor, ao custo de acoplar a API a uma escolha de modelagem. O campo `role` permanece no contrato para permitir reativar contexto de atendente sem mudar o esquema.
 >
 > A janela é parte da especificação de features: por P4, mudar tamanho **ou escopo** exige nova `model_version`, e `history_window` e `history_scope` no manifesto devem bater com o comportamento da API (divergência impede subir o serviço).
@@ -148,7 +148,7 @@ Contrato interno, não exposto ao frontend.
 | `request_id` | string | não | Eco do pedido |
 | `customer_id` | string | não | Eco do pedido |
 | `conversation_id` | string | não | Eco do pedido |
-| `trigger_message_id` | string | não | Eco do pedido |
+| `trigger_message_id` | string | não | Eco de `history[-1].message_id` |
 | `score` | number | não | **Decidido (ADR-0001):** contínuo em `[-1.0, 1.0]` |
 | `scale` | string | não | **Decidido (ADR-0001):** sempre `'-1 to 1'` |
 | `mood_label` | string | sim | **Decidido (ADR-0001):** `null` no MVP; T6 fora de escopo |
@@ -208,7 +208,6 @@ Uma linha por cliente. Criada no primeiro `ingest` do cliente (upsert).
 | Coluna | Tipo | Nulo? | Restrição | Descrição |
 |---|---|---|---|---|
 | `customer_id` | VARCHAR | não | PK | Identificador recebido no ingest; pseudônimo por P5 (ver seção 8) |
-| `display_name` | VARCHAR | sim | — | Nome exibido ao atendente. PII: nunca sai do DuckDB |
 | `first_seen_at` | TIMESTAMPTZ | não | — | `received_at` da primeira mensagem |
 | `last_message_at` | TIMESTAMPTZ | não | — | `sent_at` da mensagem mais recente, atualizado a cada ingest |
 
@@ -251,7 +250,6 @@ Uma linha por mensagem, dos dois papéis. Tabela **imutável**: não há `UPDATE
 | `text` | VARCHAR | não | — | Corpo da mensagem. Se é bruto ou mascarado depende de T2 (em aberto) |
 | `sent_at` | TIMESTAMPTZ | não | — | `timestamp` informado pelo cliente. Chave de ordenação |
 | `received_at` | TIMESTAMPTZ | não | padrão `now()` | Momento em que a API persistiu |
-| `client_message_id` | VARCHAR | sim | UNIQUE (`conversation_id`, `client_message_id`) | Idempotência de reenvio |
 
 Índices, **decididos (ADR-0007)**:
 
@@ -416,7 +414,7 @@ O gerador define persona e trajetória emocional da conversa **antes** de escrev
 
 ### 4.2 Snapshot de dados reais — `raw/snapshots/<snapshot_id>.parquet`
 
-**Pós-MVP.** Exportação de `messages` (e opcionalmente de `mood_scores`) feita **pelo mood-api**, preservando P1. Mesmo esquema de colunas de 3.3, mais `snapshot_id` e `exported_at`, e **sem** `display_name`, excluído por construção (P5).
+**Pós-MVP.** Exportação de `messages` (e opcionalmente de `mood_scores`) feita **pelo mood-api**, preservando P1. Mesmo esquema de colunas de 3.3, mais `snapshot_id` e `exported_at`.
 
 > **Em aberto:** mecanismo de exportação (`COPY ... TO` por endpoint administrativo ou job agendado), recorte temporal e se o texto sai já mascarado (T2).
 
@@ -508,7 +506,7 @@ Customer (customer_id) ──1:N── Conversation (conversation_id) ──1:N�
 - **Um cliente pode ter vários humores ao mesmo tempo**, um por conversa ativa. Nenhum deles é "o humor do cliente": não existe agregação por cliente no modelo.
 - **A janela não atravessa conversas.** Conversa nova começa sem contexto, mesmo para cliente antigo — o sinal entre atendimentos foi abandonado de propósito (ADR-0007).
 - **Conversa não tem ciclo de vida** (ADR-0006): nasce na primeira mensagem `customer` e não é encerrada nem reaberta.
-- **Toda mensagem tem identidade própria** (`message_id`). A deduplicação de reenvio usa (`conversation_id`, `client_message_id`), quando informado.
+- **Toda mensagem tem identidade própria** (`message_id`), gerado pela API.
 - **Humor é um evento, não um estado** (P2). A chave natural de `mood_scores` é (`trigger_message_id`, `model_version`); o estado atual é sempre derivado por view.
 - **Só mensagens `customer` disparam inferência.** Uma `agent` é persistida, mas nunca aparece como `trigger_message_id` nem entra na janela de histórico do MVP.
 - **Nem toda mensagem `customer` tem score.** Falha e quarentena quebram a correspondência 1:1 com `mood_scores` (ADR-0004).
@@ -551,7 +549,7 @@ O [chat-app](../chat-app/src/App.tsx) depende destes campos:
 | Indicador de humor obsoleto | `MoodResponse.computed_at` (ADR-0004) |
 | A que conversa o humor pertence | `MoodResponse.conversation_id` (obrigatório, ADR-0007) |
 | Ordenação da lista de conversas | `conversations.last_message_at` |
-| Lista de conversas: `id`, `customerId`, `customerName`, `lastSeen` | `conversations.conversation_id`, `customer_id`, `customers.display_name`, `conversations.last_message_at` |
+| Lista de conversas: `id`, `customerId`, `lastSeen` | `conversations.conversation_id`, `customer_id`, `conversations.last_message_at` (nome de exibição é gerado pelo próprio chat-app, não vem do backend) |
 | Mensagens: `id`, `role`, `text`, `time` | `messages.message_id`, `role`, `text`, `sent_at` |
 
 Renomear ou mudar o tipo de `score`, `scale` ou `model_version` quebra o frontend.
@@ -573,7 +571,6 @@ Renomear ou mudar o tipo de `score`, `scale` ou `model_version` quebra o fronten
 | Dado | Onde aparece | Tratamento |
 |---|---|---|
 | `customer_id` | todas as tabelas, artefatos de ML | Sempre **pseudônimo**, nunca telefone ou e-mail em claro. Se a origem só tiver telefone, a API guarda hash com segredo (HMAC). **Em aberto:** o mecanismo |
-| `display_name` | `customers` | PII. Só no DuckDB; excluído por construção de snapshots e datasets |
 | `text` | `messages`, snapshots, datasets | Pode conter CPF, telefone, e-mail. Mascaramento em T2 (em aberto) |
 | `text` de `agent` | `messages` | Não trafega no `InferRequest`: a janela só leva mensagens `customer` (ADR-0007), o que reduz PII em trânsito |
 | `inference_failures.detail` | DuckDB | Nunca contém trechos de mensagem. Logs de erro carregam `message_id`, nunca `text` |
@@ -635,11 +632,11 @@ Armazenamento fora do git (verificação de P5): `mood-api/data/`, `mood-ml/data
 | # | Scaffold atual | Planejado | Arquivo |
 |---|---|---|---|
 | 1 | Não há tabelas `customers` e `conversations` | Tabelas 3.1 e 3.2, com FKs e a criação de conversa do ADR-0006 | [connection.py](../mood-api/app/db/connection.py) |
-| 2 | `messages` com colunas `id`, `message`, `timestamp` | `message_id`, `text`, `sent_at`, mais `received_at` e `client_message_id` | [connection.py](../mood-api/app/db/connection.py) |
+| 2 | `messages` com colunas `id`, `message`, `timestamp` | `message_id`, `text`, `sent_at`, mais `received_at` | [connection.py](../mood-api/app/db/connection.py) |
 | 3 | `TIMESTAMP` sem timezone | `TIMESTAMPTZ` em UTC | [connection.py](../mood-api/app/db/connection.py) |
 | 4 | `mood_scores` com PK `customer_id`, que sobrescreve o humor anterior | Append-only com `mood_id` + views de humor atual (P2) | [connection.py](../mood-api/app/db/connection.py), [routes.py](../mood-api/app/api/routes.py) |
 | 5 | Não há registro de falhas nem quarentena | `inference_failures` com `conversation_id` e consulta de quarentena (P3, ADR-0004) | — |
-| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `trigger_message_id`, `history` de até 30 mensagens `customer` da conversa (ADR-0007) | [predict.py](../mood-ml/infer/predict.py) |
+| 6 | `InferRequest` envia só a mensagem, sem `message_id` nem histórico | `request_id`, `history` de até 30 mensagens `customer` da conversa, mensagem disparadora sempre `history[-1]` (ADR-0007) | [predict.py](../mood-ml/infer/predict.py) |
 | 7 | `InferResponse` não ecoa conversa, mensagem nem pedido; placeholder `score=0.0`, `scale="neutral"` | Ecos + `scale = '-1 to 1'`; erro via HTTP, nunca score padrão (P3, ADR-0001) | [predict.py](../mood-ml/infer/predict.py) |
 | 8 | Mocks do frontend usam `'0 to 1'` e `'-1 to 1'`, e a barra sempre assume `-1..1` | Escala única `-1 to 1`; barra normalizada pela mesma função do emoji | [App.tsx](../chat-app/src/App.tsx), [api.ts](../chat-app/src/services/api.ts) |
 | 9 | Resposta do ingest não devolve `message_id` | `{"status", "message_id"}` | [routes.py](../mood-api/app/api/routes.py) |
