@@ -5,18 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 import shutil
-import sys
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
+from common.errors import PipelineError
+from common.io import atomic_write, with_io_retry, write_json
+from common.log import configure_logging, log, now_iso
 
 logger = logging.getLogger("registry.registry")
 
@@ -26,52 +26,32 @@ logger = logging.getLogger("registry.registry")
 # ---------------------------------------------------------------------------
 
 
-class RegisterGateError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class RegisterGateError(PipelineError):
+    pass
 
 
-class CandidateRejectedError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class CandidateRejectedError(PipelineError):
+    pass
 
 
-class PromoteGateError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class PromoteGateError(PipelineError):
+    pass
 
 
-class MetricRegressionError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class MetricRegressionError(PipelineError):
+    pass
 
 
-class RegistryIOError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class RegistryIOError(PipelineError):
+    pass
+
+
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
 
 
 def _with_io_retry(operation: str, func: Any, run_id: str, error_code: str) -> Any:
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            _log(logging.WARNING, "io_retry", run_id=run_id, attempt=attempt, operation=operation, errno=exc.errno)
-    raise RegistryIOError(error_code, f"{operation} failed after retries: {last_exc}")
+    return with_io_retry(operation, func, run_id, logger=logger, error=lambda detail: RegistryIOError(error_code, detail))
 
 
 # ---------------------------------------------------------------------------
@@ -235,66 +215,11 @@ def promote_model(
 
 
 def _copy_atomic(src: Path, dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        shutil.copyfile(src, tmp)
-        os.replace(tmp, dest)
-
-    _with_io_retry("copy_model", _write, run_id, "RG_R15_IO_FAILED")
+    _with_io_retry("copy_model", lambda: atomic_write(dest, lambda tmp: shutil.copyfile(src, tmp)), run_id, "RG_R15_IO_FAILED")
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str, error_code: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_json", _write, run_id, error_code)
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    logger.log(level, event, extra={"fields": {"run_id": run_id, **fields}})
+    _with_io_retry("write_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id, error_code)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +335,7 @@ def _run_promote(args: argparse.Namespace) -> int:
         _log(logging.INFO, "already_active", run_id=run_id, model_version=result.model_version)
         return 0
 
-    active_json = {"model_version": result.model_version, "promoted_at": _now_iso()}
+    active_json = {"model_version": result.model_version, "promoted_at": now_iso()}
     try:
         _write_json_atomic(active_json, Path(args.models_dir) / "active.json", run_id, "PM_R09_IO_FAILED")
     except RegistryIOError as exc:
