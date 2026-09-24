@@ -6,13 +6,11 @@ import argparse
 import hashlib
 import json
 import logging
-import os
-import sys
-import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +18,9 @@ import pandas as pd
 import yaml
 from sklearn.model_selection import GroupShuffleSplit
 
+from common.errors import PipelineError
+from common.io import atomic_write, with_io_retry, write_json
+from common.log import configure_logging, log, now_iso
 from ingest.validate import (
     IngestGateError,
     check_ingest_gate,
@@ -28,7 +29,6 @@ from ingest.validate import (
 )
 from transform.features import FEATURE_SPEC_VERSION, extract_features
 
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 DEFAULT_SPLIT_CONFIG = {"train_ratio": 0.70, "validation_ratio": 0.15, "test_ratio": 0.15, "seed": 42}
 MAX_HISTORY_SIZE = 30
 
@@ -40,32 +40,20 @@ logger = logging.getLogger("transform.split")
 # ---------------------------------------------------------------------------
 
 
-class SplitGateError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class SplitGateError(PipelineError):
+    pass
 
 
-class DatasetIdentityConflictError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class DatasetIdentityConflictError(PipelineError):
+    pass
 
 
-class SplitSanityError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class SplitSanityError(PipelineError):
+    pass
 
 
-class SplitIOError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class SplitIOError(PipelineError):
+    pass
 
 
 class _LabelsGateError(Exception):
@@ -75,17 +63,9 @@ class _LabelsGateError(Exception):
         self.detail = detail
 
 
-def _with_io_retry(operation: str, func: Any, run_id: str) -> Any:
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            _log(logging.WARNING, "io_retry", run_id=run_id, attempt=attempt, operation=operation, errno=exc.errno)
-    raise SplitIOError("SP_R16_IO_FAILED", f"{operation} failed after retries: {last_exc}")
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
+_with_io_retry = partial(with_io_retry, logger=logger, error=lambda detail: SplitIOError("SP_R16_IO_FAILED", detail))
 
 
 # ---------------------------------------------------------------------------
@@ -318,26 +298,11 @@ def build_dataset(
 
 
 def _write_parquet_atomic(df: pd.DataFrame, dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        df.to_parquet(tmp, index=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry(f"write_{dest.stem}", _write, run_id)
+    _with_io_retry(f"write_{dest.stem}", lambda: atomic_write(dest, lambda tmp: df.to_parquet(tmp, index=False)), run_id)
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_dataset_json", _write, run_id)
+    _with_io_retry("write_dataset_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id)
 
 
 def _load_split_config(config_path: Path | None) -> dict[str, Any]:
@@ -346,46 +311,6 @@ def _load_split_config(config_path: Path | None) -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as f:
         full_config = yaml.safe_load(f) or {}
     return {**DEFAULT_SPLIT_CONFIG, **full_config.get("split", {})}
-
-
-# ---------------------------------------------------------------------------
-# Logging (same JSON-per-line pattern as ingest.validate / labels.build)
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    logger.log(level, event, extra={"fields": {"run_id": run_id, **fields}})
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_parquet_atomic(result.validation_df, datasets_dir / "validation.parquet", run_id)
         _write_parquet_atomic(result.test_df, datasets_dir / "test.parquet", run_id)
 
-        dataset_json = {**result.dataset_json, "created_at": _now_iso()}
+        dataset_json = {**result.dataset_json, "created_at": now_iso()}
         _write_json_atomic(dataset_json, datasets_dir / "dataset.json", run_id)
     except SplitIOError as exc:
         _log(logging.ERROR, "io_failed", run_id=run_id, detail=exc.detail)
