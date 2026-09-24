@@ -49,3 +49,7 @@ def atomic_write(dest: Path, write_tmp: Callable[[Path], Any]) -> None:
 def write_json(payload: dict[str, Any], path: Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
+
+
+def write_json_atomic(payload: dict[str, Any], dest: Path) -> None:
+    atomic_write(dest, lambda tmp: write_json(payload, tmp))

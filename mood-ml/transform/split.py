@@ -19,7 +19,7 @@ import yaml
 from sklearn.model_selection import GroupShuffleSplit
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import atomic_write, with_io_retry, write_json_atomic
 from common.log import configure_logging, log, now_iso
 from ingest.validate import (
     IngestGateError,
@@ -302,7 +302,7 @@ def _write_parquet_atomic(df: pd.DataFrame, dest: Path, run_id: str) -> None:
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str) -> None:
-    _with_io_retry("write_dataset_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id)
+    _with_io_retry("write_dataset_json", lambda: write_json_atomic(payload, dest), run_id)
 
 
 def _load_split_config(config_path: Path | None) -> dict[str, Any]:

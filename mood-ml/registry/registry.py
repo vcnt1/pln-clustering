@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import atomic_write, with_io_retry, write_json_atomic
 from common.log import configure_logging, log, now_iso
 
 logger = logging.getLogger("registry.registry")
@@ -219,7 +219,7 @@ def _copy_atomic(src: Path, dest: Path, run_id: str) -> None:
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str, error_code: str) -> None:
-    _with_io_retry("write_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id, error_code)
+    _with_io_retry("write_json", lambda: write_json_atomic(payload, dest), run_id, error_code)
 
 
 # ---------------------------------------------------------------------------

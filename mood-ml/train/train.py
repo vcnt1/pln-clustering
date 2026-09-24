@@ -25,7 +25,7 @@ from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import atomic_write, with_io_retry, write_json_atomic
 from common.log import configure_logging, log, now_iso
 from evaluate.metrics import (
     clip_score,
@@ -240,7 +240,7 @@ def _dump_joblib_atomic(obj: Any, dest: Path, run_id: str) -> None:
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str) -> None:
-    _with_io_retry("write_train_manifest", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id)
+    _with_io_retry("write_train_manifest", lambda: write_json_atomic(payload, dest), run_id)
 
 
 def _load_config(path: Path) -> dict[str, Any]:

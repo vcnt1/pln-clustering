@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import with_io_retry, write_json_atomic
 from common.log import configure_logging, log, to_iso
 from transform.mask import count_pii
 
@@ -673,7 +673,7 @@ def _evaluate_composition(
 
 
 def _write_report_atomic(report: dict[str, Any], dest: Path) -> None:
-    _with_io_retry("write_report", lambda: atomic_write(dest, lambda tmp: write_json(report, tmp)))
+    _with_io_retry("write_report", lambda: write_json_atomic(report, dest))
 
 
 def _write_review_sample(path: Path, dest: Path, n: int, seed: int) -> Path:

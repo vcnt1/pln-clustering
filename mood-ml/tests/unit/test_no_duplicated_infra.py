@@ -2,7 +2,7 @@ from pathlib import Path
 
 MOOD_ML_ROOT = Path(__file__).resolve().parent.parent.parent
 EXCLUDED_DIRS = {"common", "tests", ".venv", "data", "models"}
-FORBIDDEN = ("class _JsonFormatter", "class _TextFormatter", "IO_RETRY_BACKOFF_SECONDS =", "time.sleep(")
+FORBIDDEN = ("class _JsonFormatter", "class _TextFormatter", "IO_RETRY_BACKOFF_SECONDS =", "time.sleep(", "lambda tmp: write_json(")
 
 
 def test_ca08_infra_lives_only_in_common() -> None:

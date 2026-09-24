@@ -6,7 +6,7 @@ import pytest
 
 import common.io as common_io
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import atomic_write, with_io_retry, write_json, write_json_atomic
 from common.log import configure_logging, log
 
 
@@ -110,6 +110,17 @@ def test_write_json_keeps_the_existing_on_disk_format(tmp_path: Path) -> None:
     path = tmp_path / "x.json"
     write_json({"b": 1, "a": "ç"}, path)
     assert path.read_text(encoding="utf-8") == '{\n  "a": "ç",\n  "b": 1\n}'
+
+
+def test_ca10_write_json_atomic_matches_write_json_and_leaves_no_tmp(tmp_path: Path) -> None:
+    payload = {"b": 1, "a": "ç"}
+    plain = tmp_path / "a.json"
+    atomic = tmp_path / "nested" / "b.json"
+    write_json(payload, plain)
+    write_json_atomic(payload, atomic)
+
+    assert atomic.read_bytes() == plain.read_bytes()
+    assert list(atomic.parent.glob("*.tmp")) == []
 
 
 # ---------------------------------------------------------------------------

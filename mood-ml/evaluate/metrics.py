@@ -23,7 +23,7 @@ from scipy.stats import ConstantInputWarning, spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import with_io_retry, write_json_atomic
 from common.log import configure_logging, log, now_iso
 from transform.features import FEATURE_SPEC_VERSION
 
@@ -220,7 +220,7 @@ def evaluate_candidate(
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str) -> None:
-    _with_io_retry("write_eval_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id)
+    _with_io_retry("write_eval_json", lambda: write_json_atomic(payload, dest), run_id)
 
 
 def _load_config(path: Path) -> dict[str, Any]:

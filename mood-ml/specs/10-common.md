@@ -25,6 +25,7 @@ As cópias já tinham divergido. No ingest, o evento `io_retry` saía com o JSON
 | | `with_io_retry(operation, func, run_id=None, *, logger, error)` | Chama `func()`. Em `OSError`, loga `io_retry` (`attempt`, `operation`, `errno`) e retenta após 1s, 2s e 4s: são 4 tentativas no total. Esgotadas, levanta `error(detail)`, em que `error` é uma fábrica da exceção da camada. Outras exceções propagam sem retentativa. |
 | | `atomic_write(dest, write_tmp)` | Cria o diretório pai, chama `write_tmp(<dest>.tmp)` e faz `os.replace` para `dest`. Não faz retentativa própria: quem chama embrulha em `with_io_retry`. |
 | | `write_json(payload, path)` | `json.dump` com `indent=2, sort_keys=True, ensure_ascii=False`. |
+| | `write_json_atomic(payload, dest)` | `atomic_write` com `write_json`. Como `atomic_write`, não faz retentativa própria. |
 | `common/log.py` | `now_iso()`, `to_iso(dt)` | ISO-8601 UTC, com milissegundos e sufixo `Z`. |
 | | `JsonFormatter`, `TextFormatter` | Um objeto JSON por linha (`ts`, `level`, `event` + campos), ou texto legível para `--log-format text`. |
 | | `configure_logging(logger, log_format, log_level)` | Um único *handler* em `stderr`, sem propagação. Chamar de novo substitui o *handler* em vez de duplicar. |
@@ -58,8 +59,9 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - **CA-05** `atomic_write` com sucesso → `dest` com o conteúdo novo e nenhum `*.tmp` no diretório.
 - **CA-06** `log(..., run_id=None)` → a linha não tem a chave `run_id`; com `run_id="x"` → `"run_id": "x"`.
 - **CA-07** `configure_logging` chamado 2x no mesmo *logger* → um único *handler*.
-- **CA-08** Guarda anti-duplicação: nenhum `.py` fora de `common/` e `tests/` contém `class _JsonFormatter`, `class _TextFormatter`, `IO_RETRY_BACKOFF_SECONDS =` ou `time.sleep(`.
+- **CA-08** Guarda anti-duplicação: nenhum `.py` fora de `common/` e `tests/` contém `class _JsonFormatter`, `class _TextFormatter`, `IO_RETRY_BACKOFF_SECONDS =`, `time.sleep(` ou `lambda tmp: write_json(`.
 - **CA-09** A suíte existente continua verde sem alterar asserções, só os alvos de *monkeypatch* de `time.sleep`.
+- **CA-10** `write_json_atomic` grava em `dest` exatamente os bytes de `write_json` para o mesmo *payload* e não deixa `*.tmp`.
 
 ## 6. Fora de escopo
 
@@ -81,3 +83,4 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - [x] Migrar `ingest/validate.py` (corrige o `io_retry` aninhado; alvo de *monkeypatch* → `common.io.time`)
 - [x] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
 - [x] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
+- [x] `write_json_atomic` no lugar do *lambda* aninhado nos 6 módulos (CA-10, CA-08)

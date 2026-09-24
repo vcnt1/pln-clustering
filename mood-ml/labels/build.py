@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json
+from common.io import atomic_write, with_io_retry, write_json_atomic
 from common.log import configure_logging, log, to_iso
 from ingest.validate import (
     IngestGateError,
@@ -158,7 +158,7 @@ def _write_parquet_atomic(rows: list[dict[str, Any]], dest: Path, run_id: str) -
 
 
 def _write_report_atomic(report: dict[str, Any], dest: Path, run_id: str) -> None:
-    _with_io_retry("write_label_report", lambda: atomic_write(dest, lambda tmp: write_json(report, tmp)), run_id)
+    _with_io_retry("write_label_report", lambda: write_json_atomic(report, dest), run_id)
 
 
 # ---------------------------------------------------------------------------
