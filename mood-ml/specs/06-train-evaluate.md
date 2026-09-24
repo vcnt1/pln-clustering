@@ -255,6 +255,8 @@ Orçamento de desempenho: `train.train` em menos de 1 minuto no corpus esperado,
 
 **Sobre I/O: 3 tentativas, backoff 1s/2s/4s.** Mesmo padrão das specs 02–05, aplicado à leitura dos `.parquet`, à leitura/escrita dos `.joblib` e dos `.json`.
 
+> Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
+
 **Gravação atômica, em ordem.** Em `train.train`: `baseline.joblib`, depois `candidate.joblib`, depois `train_manifest.json` (marcador de sucesso — sua presença implica os dois modelos gravados). Em `evaluate.metrics`: só `eval.json`, sempre por `.tmp` + `os.replace()`.
 
 ### 4.3 *Exit codes*
@@ -290,6 +292,8 @@ Orçamento de desempenho: `train.train` em menos de 1 minuto no corpus esperado,
 ### 5.1 Padrão
 
 Mesmo formato das specs anteriores: JSON por linha em `stderr`, campos `ts`, `level`, `event`, `run_id`, mais `dataset_id` e `fingerprint`.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 ### 5.2 Eventos — `train.train`
 

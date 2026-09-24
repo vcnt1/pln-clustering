@@ -168,6 +168,8 @@ Orçamento de desempenho: a varredura de idempotência (§3.3) sobre dezenas de 
 
 **Sobre I/O: 3 tentativas, backoff 1s/2s/4s.** Mesmo padrão de todas as specs anteriores, aplicado à leitura de `eval.json`/`train_manifest.json`/`dataset.json`/`manifest.json`, à cópia de `candidate.joblib` → `model.joblib`, e à escrita de `manifest.json`/`active.json`.
 
+> Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
+
 **Gravação atômica, em ordem — `register`.** `model.joblib` primeiro (cópia via arquivo temporário + `os.replace()`), `manifest.json` por último. `manifest.json` é o marcador de sucesso: sua presença implica o modelo copiado corretamente. Se a cópia falhar e for retentada, nada em `models/<model_version>/` fica pela metade visível a quem procura por `manifest.json`.
 
 **Gravação atômica — `promote`.** Só `active.json`, via `.tmp` + `os.replace()`. Não há ordem a definir porque só há um arquivo.
@@ -203,6 +205,8 @@ Orçamento de desempenho: a varredura de idempotência (§3.3) sobre dezenas de 
 ### 5.1 Padrão
 
 Mesmo formato de todas as specs anteriores: JSON por linha em `stderr`, campos `ts`, `level`, `event`, `run_id`.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 ### 5.2 Eventos — `registry.register`
 

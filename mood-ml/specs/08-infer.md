@@ -152,6 +152,8 @@ Não há volumetria de requisições por segundo a estimar — o `README.md` já
 
 Mesmo formato das specs anteriores: JSON por linha em `stderr`/`stdout` do processo, `ts` ISO-8601 UTC, `level`, `event`. Diferença estrutural: os eventos desta camada são de **duas naturezas** — os de subida (uma vez por vida do processo) e os de requisição (um por chamada).
 
+> Implementação: `common.log`; a retentativa de I/O da subida (IF-R19) usa `common.io.with_io_retry` ([spec 10](10-common.md)).
+
 ### 5.2 Eventos de subida
 
 | Nível | Evento | Carga |

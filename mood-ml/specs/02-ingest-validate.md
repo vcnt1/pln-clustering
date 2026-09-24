@@ -244,6 +244,8 @@ A distinção governa tudo nesta seção:
 
 O caso real que isso cobre é doméstico e frequente: o arquivo ainda está sendo escrito pelo gerador, ou está aberto no editor, e o Windows nega o *lock*. Esgotadas as tentativas, *exit* 1 com `IG_R15_IO_FAILED`.
 
+> Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
+
 **Gravação atômica.** O report é escrito em `validation_report.json.tmp` e movido com `os.replace()`, que é atômico no mesmo volume, inclusive em NTFS. Report truncado por interrupção no meio da escrita seria pior que report ausente: `labels/` leria um `status` parcial. Não existe estado intermediário a limpar — interrupção em qualquer fase deixa o report anterior intacto.
 
 ### 4.3 *Exit codes*
@@ -271,6 +273,8 @@ O fundamento é proporcionalidade: alerta serve para quem **não** está olhando
 ### 5.1 Padrão
 
 Log estruturado, **um objeto JSON por linha**, em `stderr` (`--log-format text` dá saída legível para uso interativo). `stdout` carrega apenas o caminho do report e uma linha de resumo, para que a saída seja encadeável em pipe sem ruído.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 Campos obrigatórios em todo evento:
 

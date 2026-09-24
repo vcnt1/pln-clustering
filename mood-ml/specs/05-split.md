@@ -196,6 +196,8 @@ Orçamento de desempenho: alguns segundos no corpus esperado, até poucos minuto
 
 **Sobre I/O: 3 tentativas, backoff 1s/2s/4s.** Mesmo padrão das specs 02 e 03, aplicado a quatro leituras (corpus, dois reports, `.parquet` de labels) e à escrita de quatro arquivos de saída.
 
+> Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
+
 **Gravação atômica, em ordem.** Os três `.parquet` primeiro (`train`, `validation`, `test`, cada um via `.tmp` + `os.replace()`), o `dataset.json` por último. `dataset.json` é o marcador de sucesso — sua presença com o esquema completo implica que os três splits foram gravados corretamente, o mesmo papel que o `label_report.json` cumpria na spec 03.
 
 ### 4.3 *Exit codes*
@@ -220,6 +222,8 @@ Três causas, três códigos, o mesmo raciocínio das specs 02/03: dado (3), ide
 ### 5.1 Padrão
 
 Idêntico às specs anteriores: um objeto JSON por linha em `stderr`, campos `ts`, `level`, `event`, `run_id`, mais `corpus_id` e `dataset_id`.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 ### 5.2 Eventos e níveis
 

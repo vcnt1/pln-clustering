@@ -190,6 +190,8 @@ Cada camada já usa o mesmo vocabulário de números para os mesmos tipos de fal
 
 **Nenhuma nova.** Cada camada já retenta sua própria I/O (3x, *backoff* 1s/2s/4s, specs 02–07); `pipeline.py` não adiciona uma segunda camada de retentativa por cima — evita duplicar espera (uma retentativa de `pipeline.py` em cima de uma retentativa de `train.train`, por exemplo, multiplicaria o tempo de espera sem motivo).
 
+> Implementação da retentativa de cada camada: `common.io.with_io_retry` ([spec 10](10-common.md)). `pipeline.py` não a chama.
+
 ### 4.4 Alertas e notificações
 
 **Nenhum canal externo**, mesma razão de todas as specs anteriores. O CI (§3.6) é o único "alerta" desta camada — falha vermelha no GitHub, sem notificação ativa além do que o próprio GitHub já oferece.
@@ -199,6 +201,8 @@ Cada camada já usa o mesmo vocabulário de números para os mesmos tipos de fal
 ### 5.1 Padrão
 
 Mesmo formato de todas as specs anteriores: JSON por linha em `stderr`, campos `ts`, `level`, `event`.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 ### 5.2 Eventos de `pipeline.py`
 

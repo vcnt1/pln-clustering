@@ -195,6 +195,8 @@ Mesma distinção da spec 02, adaptada:
 
 **Sobre I/O: 3 tentativas, backoff 1s/2s/4s.** As mesmas duas categorias de operação da spec 02 — abrir arquivo para leitura, gravar arquivo — aplicadas aos três alvos desta camada: reler o corpus (via `load_corpus()`), ler o `validation_report.json` do portão, e escrever `.parquet` + `label_report.json`.
 
+> Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
+
 **Gravação atômica, em duas etapas ordenadas.** Primeiro o `.parquet` (`os.replace()` a partir de `.tmp`), depois o `label_report.json`. Se a escrita do report falhar após o parquet já ter sido substituído, uma nova execução resolve os dois de uma vez — o parquet será sobrescrito pelo mesmo conteúdo (determinismo, §2.3) e o report finalmente será gravado. Não existe janela em que o parquet fique inconsistente com o corpus que o gerou, porque o parquet é sempre a última coisa que muda antes do report confirmar.
 
 ### 4.3 *Exit codes*
@@ -218,6 +220,8 @@ O *exit* 4 é deliberadamente distinto do *exit* 3: um aponta para o corpus (age
 ### 5.1 Padrão
 
 Idêntico ao do ingest (spec 02 §5.1): um objeto JSON por linha em `stderr`, `stdout` reservado ao caminho dos artefatos gerados e a um resumo de uma linha. Campos obrigatórios: `ts` (ISO-8601 UTC, sufixo `Z`), `level`, `event`, `run_id`, `corpus_id`.
+
+> Implementação: `common.log` ([spec 10](10-common.md)).
 
 ### 5.2 Eventos e níveis
 
