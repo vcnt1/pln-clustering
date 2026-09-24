@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +18,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from common.errors import PipelineError
+from common.io import with_io_retry
+from common.log import configure_logging, log
 from evaluate.metrics import clip_score
 from train.train import SUPPORTED_ALGORITHMS
 from transform.features import FEATURE_SPEC_VERSION, MAX_HISTORY_SIZE, extract_features
 
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 EXPECTED_HISTORY_WINDOW = MAX_HISTORY_SIZE
 EXPECTED_HISTORY_SCOPE = "conversation"
 
@@ -65,14 +67,12 @@ class InferResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class RegistryBrokenError(Exception):
+class RegistryBrokenError(PipelineError):
     """IF-R03: active.json aponta para um model_version sem manifest.json
     legível ou model.joblib válido."""
 
     def __init__(self, detail: str) -> None:
-        super().__init__(detail)
-        self.code = "IF_R03_STARTUP_REGISTRY_BROKEN"
-        self.detail = detail
+        super().__init__("IF_R03_STARTUP_REGISTRY_BROKEN", detail)
 
 
 class FeatureSpecMismatchError(Exception):
@@ -96,17 +96,9 @@ class _InferIOError(Exception):
     de conteúdo ou uma falha transitória que não se resolveu nas 3 tentativas)."""
 
 
-def _with_io_retry(operation: str, func: Any) -> Any:
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            _log(logging.WARNING, "io_retry", attempt=attempt, operation=operation, errno=exc.errno)
-    raise _InferIOError(f"{operation} failed after retries: {last_exc}")
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
+_with_io_retry = partial(with_io_retry, logger=logger, error=_InferIOError)
 
 
 # ---------------------------------------------------------------------------
@@ -293,45 +285,3 @@ async def healthz(request: Request) -> dict[str, Any]:
     if model_state.pipeline is None:
         return {"status": "degraded", "model_version": None}
     return {"status": "ok", "model_version": model_state.model_version}
-
-
-# ---------------------------------------------------------------------------
-# Logging — mesmo padrão duplicado por módulo das Fases 1-3, configurado uma
-# vez na subida (não em um main() de CLI: este módulo não tem argv próprio).
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    payload = {"run_id": run_id, **fields} if run_id is not None else fields
-    logger.log(level, event, extra={"fields": payload})
