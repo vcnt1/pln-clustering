@@ -6,13 +6,11 @@ import argparse
 import hashlib
 import json
 import logging
-import os
-import sys
-import time
 import uuid
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -24,9 +22,10 @@ import yaml
 from scipy.stats import ConstantInputWarning, spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+from common.errors import PipelineError
+from common.io import atomic_write, with_io_retry, write_json
+from common.log import configure_logging, log, now_iso
 from transform.features import FEATURE_SPEC_VERSION
-
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 
 logger = logging.getLogger("evaluate.metrics")
 
@@ -36,31 +35,17 @@ logger = logging.getLogger("evaluate.metrics")
 # ---------------------------------------------------------------------------
 
 
-class EvaluateGateError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class EvaluateGateError(PipelineError):
+    pass
 
 
-class EvaluateIOError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class EvaluateIOError(PipelineError):
+    pass
 
 
-def _with_io_retry(operation: str, func: Any, run_id: str = "n/a") -> Any:
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            _log(logging.WARNING, "io_retry", run_id=run_id, attempt=attempt, operation=operation, errno=exc.errno)
-    raise EvaluateIOError("EV_IO_FAILED", f"{operation} failed after retries: {last_exc}")
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
+_with_io_retry = partial(with_io_retry, logger=logger, error=lambda detail: EvaluateIOError("EV_IO_FAILED", detail))
 
 
 # ---------------------------------------------------------------------------
@@ -234,15 +219,7 @@ def evaluate_candidate(
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_eval_json", _write, run_id)
+    _with_io_retry("write_eval_json", lambda: atomic_write(dest, lambda tmp: write_json(payload, tmp)), run_id)
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -250,46 +227,6 @@ def _load_config(path: Path) -> dict[str, Any]:
         return {}
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    logger.log(level, event, extra={"fields": {"run_id": run_id, **fields}})
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     finished_at = datetime.now(timezone.utc)
     eval_json = {
         **result.eval_json,
-        "evaluated_at": _now_iso(),
+        "evaluated_at": now_iso(),
         "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
     }
     eval_json_path = result.staging_dir / "eval.json"
