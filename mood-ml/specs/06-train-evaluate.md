@@ -306,6 +306,7 @@ Mesmo formato das specs anteriores: JSON por linha em `stderr`, campos `ts`, `le
 | INFO | `train_finished` | `fingerprint`, `staging_path`, `duration_ms` |
 | WARNING | `io_retry` | `attempt`, `operation`, `errno` |
 | ERROR | `gate_blocked` | `reason` |
+| ERROR | `config_invalid` | `reason`, `detail` |
 | ERROR | `sanity_check_failed` | `model`, `detail` |
 | ERROR | `io_failed` / `internal_error` | `operation`, `errno` / `exc_type` e *traceback* |
 
@@ -355,7 +356,7 @@ Nenhuma referência a `duckdb` ou `.duckdb` em `train/` ou `evaluate/` — mesma
 ## 7. Requisitos verificáveis
 
 **`train.train` — Portão e identidade**
-- **TN-R01** QUANDO `data/datasets/<dataset_id>/dataset.json` não existir ou estiver incompleto, o script DEVE abortar com *exit* 3, sem treinar.
+- **TN-R01** QUANDO `data/datasets/<dataset_id>/dataset.json` não existir ou estiver incompleto (JSON ilegível ou sem `row_counts.test.rows`), o script DEVE abortar com *exit* 3, sem treinar.
 - **TN-R02** A identidade do treino (caminho de staging) DEVE ser derivada deterministicamente de `dataset_id`, hashes dos três `.parquet`, `algorithm`, hiperparâmetros e `feature_spec_version` — nunca escolhida pelo operador.
 - **TN-R03** QUANDO o staging existir completo com o mesmo *fingerprint*, o script DEVE pular o treino (no-op idempotente), *exit* 0.
 - **TN-R04** QUANDO o staging existir incompleto, o script DEVE re-treinar e sobrescrever.
@@ -364,6 +365,7 @@ Nenhuma referência a `duckdb` ou `.duckdb` em `train/` ou `evaluate/` — mesma
 - **TN-R05** Todo hiperparâmetro DEVE vir de `configs/pipeline.yaml`; nenhum valor de hiperparâmetro DEVE estar fixo no código.
 - **TN-R06** O script DEVE NÃO realizar busca de hiperparâmetros — um único fit por execução.
 - **TN-R07** Qualquer componente estocástico do pipeline DEVE receber a `seed` do config; solvers que não aceitam determinismo explícito DEVEM NÃO ser usados.
+- **TN-R17** QUANDO `train.algorithm` no config não estiver entre os algoritmos implementados, o script DEVE abortar com *exit* 2, sem ler os `.parquet`.
 
 **Vetorização**
 - **TN-R08** O bloco texto DEVE ser `FeatureUnion` de TF-IDF palavra (1-2) e TF-IDF `char_wb` (2-5) sobre `text_clean`.
@@ -403,6 +405,7 @@ Nenhuma referência a `duckdb` ou `.duckdb` em `train/` ou `evaluate/` — mesma
 |---|---|---|
 | `TN_R01_GATE_DATASET_NOT_OK` | TN-R01 | train |
 | `TN_R14_NON_FINITE_PREDICTION` | TN-R14 | train |
+| `TN_R17_UNSUPPORTED_ALGORITHM` | TN-R17 | train |
 | `TN_IO_FAILED` | — (I/O) | train |
 | `EV_R01_GATE_STAGING_NOT_OK` | EV-R01 | evaluate |
 | `EV_R08_QUALITY_GATE_FAILED` | EV-R08 | evaluate |
