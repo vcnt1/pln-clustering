@@ -69,15 +69,15 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 
 ## 7. Checklist de implementação
 
-- [ ] `common/errors.py`, `common/io.py`, `common/log.py` (CM-R01 a CM-R04)
-- [ ] `tests/unit/test_common.py` (CA-01 a CA-07)
-- [ ] `tests/unit/test_no_duplicated_infra.py` (CA-08, CM-R05)
-- [ ] Migrar `pipeline.py` (só log)
-- [ ] Migrar `evaluate/metrics.py`
-- [ ] Migrar `train/train.py`
-- [ ] Migrar `registry/registry.py`
-- [ ] Migrar `transform/split.py`
-- [ ] Migrar `labels/build.py` (alvo de *monkeypatch* de `time.sleep` → `common.io.time`)
-- [ ] Migrar `ingest/validate.py` (corrige o `io_retry` aninhado; alvo de *monkeypatch* → `common.io.time`)
-- [ ] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
-- [ ] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
+- [x] `common/errors.py`, `common/io.py`, `common/log.py` (CM-R01 a CM-R04)
+- [x] `tests/unit/test_common.py` (CA-01 a CA-07)
+- [x] `tests/unit/test_no_duplicated_infra.py` (CA-08, CM-R05)
+- [x] Migrar `pipeline.py` (só log)
+- [x] Migrar `evaluate/metrics.py`
+- [x] Migrar `train/train.py`
+- [x] Migrar `registry/registry.py`
+- [x] Migrar `transform/split.py`
+- [x] Migrar `labels/build.py` (alvo de *monkeypatch* de `time.sleep` → `common.io.time`)
+- [x] Migrar `ingest/validate.py` (corrige o `io_retry` aninhado; alvo de *monkeypatch* → `common.io.time`)
+- [x] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
+- [x] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
