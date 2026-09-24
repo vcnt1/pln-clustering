@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import os
 import sys
-import time
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from common.errors import PipelineError
+from common.io import atomic_write, with_io_retry, write_json
+from common.log import configure_logging, log, to_iso
 from ingest.validate import (
     IngestGateError,
     check_ingest_gate,
@@ -26,7 +27,6 @@ from ingest.validate import (
 
 VALID_LABELS = {-1.0, -0.5, 0.0, 0.5, 1.0}
 REPORT_VERSION = "lb-1"
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 
 # Explicit schema (LB-R07, spec §3.2): keeps `annotator` typed as string even while all-null.
 LABEL_SCHEMA = pa.schema(
@@ -51,39 +51,21 @@ _GATE_REASON_TO_CODE = {
 }
 
 
-class LabelGateError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class LabelGateError(PipelineError):
+    pass
 
 
-class LabelSanityError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class LabelSanityError(PipelineError):
+    pass
 
 
-class LabelIOError(Exception):
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+class LabelIOError(PipelineError):
+    pass
 
 
-def _with_io_retry(operation: str, func: Any, run_id: str) -> Any:
-    """Retries an I/O callable 3x with 1s/2s/4s backoff on OSError (LB-R14)."""
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            _log(logging.WARNING, "io_retry", run_id=run_id, attempt=attempt, operation=operation, errno=exc.errno)
-    raise LabelIOError("LB_R14_IO_FAILED", f"{operation} failed after retries: {last_exc}")
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
+_with_io_retry = partial(with_io_retry, logger=logger, error=lambda detail: LabelIOError("LB_R14_IO_FAILED", detail))
 
 
 # ---------------------------------------------------------------------------
@@ -171,67 +153,12 @@ def build_labels(
 
 
 def _write_parquet_atomic(rows: list[dict[str, Any]], dest: Path, run_id: str) -> None:
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pylist(rows, schema=LABEL_SCHEMA)
-        pq.write_table(table, tmp)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_label_set", _write, run_id)
+    table = pa.Table.from_pylist(rows, schema=LABEL_SCHEMA)
+    _with_io_retry("write_label_set", lambda: atomic_write(dest, lambda tmp: pq.write_table(table, tmp)), run_id)
 
 
 def _write_report_atomic(report: dict[str, Any], dest: Path, run_id: str) -> None:
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, sort_keys=True, ensure_ascii=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_label_report", _write, run_id)
-
-
-# ---------------------------------------------------------------------------
-# Logging (same JSON-per-line pattern as ingest.validate)
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    logger.log(level, event, extra={"fields": {"run_id": run_id, **fields}})
+    _with_io_retry("write_label_report", lambda: atomic_write(dest, lambda tmp: write_json(report, tmp)), run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             "report_version": REPORT_VERSION,
             "run": {
                 "run_id": run_id,
-                "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{started_at.microsecond // 1000:03d}Z",
-                "finished_at": finished_at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{finished_at.microsecond // 1000:03d}Z",
+                "started_at": to_iso(started_at),
+                "finished_at": to_iso(finished_at),
                 "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
                 "tool": "labels.build",
                 "python": sys.version.split()[0],
