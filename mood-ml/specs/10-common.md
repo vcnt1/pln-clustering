@@ -1,6 +1,6 @@
 # 10 — Infraestrutura Transversal (`common/`)
 
-**Status:** Proposta · **Versão da spec:** `cm-1` · **Data:** 2026-09-24
+**Status:** Aceita · **Versão da spec:** `cm-1` · **Data:** 2026-09-24
 **Implementa:** correção F3 do code review de 2026-09-24. Oito módulos repetiam retry de I/O, log estruturado, classes de erro e escrita atômica.
 **Depende de:** nenhuma. Não importa nenhum outro módulo do mood-ml.
 **Consumido por:** [02](02-ingest-validate.md), [03](03-labels.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md), [09](09-orquestracao-ci.md)
