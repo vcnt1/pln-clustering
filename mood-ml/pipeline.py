@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 import time
 import uuid
 from datetime import date, datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,12 @@ import labels.build as labels_build
 import registry.registry as registry_registry
 import train.train as train_train
 import transform.split as transform_split
+from common.log import configure_logging, log
 from transform.features import FEATURE_SPEC_VERSION
 
 logger = logging.getLogger("pipeline")
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
 
 
 # ---------------------------------------------------------------------------
@@ -260,48 +263,6 @@ def _run_all(args: argparse.Namespace) -> int:
         duration_ms=duration_ms,
     )
     return 0
-
-
-# ---------------------------------------------------------------------------
-# Logging — mesmo padrão duplicado por módulo das Fases 1-4, eventos só de
-# orquestração (§5.2): cada passo já loga por conta própria ao chamar o
-# main() daquele módulo.
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {"ts": _now_iso(), "level": record.levelname, "event": record.getMessage()}
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    run_id = fields.pop("run_id", None)
-    logger.log(level, event, extra={"fields": {"run_id": run_id, **fields}})
 
 
 # ---------------------------------------------------------------------------
