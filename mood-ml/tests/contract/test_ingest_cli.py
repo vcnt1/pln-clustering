@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import common.io as common_io
 import ingest.validate as ingest_validate
 from tests.conftest import make_row, write_corpus
 
@@ -94,7 +95,7 @@ def test_io_failure_after_retries_returns_exit_1(
     dest.write_bytes(sample_jsonl_path.read_bytes())
     report_dir = corpus_root / "reports"
 
-    monkeypatch.setattr(ingest_validate.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(common_io.time, "sleep", lambda _seconds: None)
 
     def _always_fails(*_args: object, **_kwargs: object) -> None:
         raise OSError("simulated permission error")
@@ -106,7 +107,7 @@ def test_io_failure_after_retries_returns_exit_1(
 
 
 def test_io_retry_succeeds_after_transient_failures(
-    corpus_root: Path, sample_jsonl_path: Path, monkeypatch: pytest.MonkeyPatch
+    corpus_root: Path, sample_jsonl_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     dest_dir = corpus_root / "raw" / "synthetic"
     dest_dir.mkdir(parents=True)
@@ -114,7 +115,7 @@ def test_io_retry_succeeds_after_transient_failures(
     dest.write_bytes(sample_jsonl_path.read_bytes())
     report_dir = corpus_root / "reports"
 
-    monkeypatch.setattr(ingest_validate.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(common_io.time, "sleep", lambda _seconds: None)
 
     real_replace = ingest_validate.os.replace
     attempts = {"n": 0}
@@ -130,3 +131,7 @@ def test_io_retry_succeeds_after_transient_failures(
     code = ingest_validate.main([str(dest), "--report-dir", str(report_dir), "--skip-composition"])
     assert code == 0
     assert attempts["n"] == 2
+    # CM-R02: io_retry is a flat JSON object, not a JSON string nested in "event".
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line]
+    retry = next(e for e in events if e["event"] == "io_retry")
+    assert retry["operation"] == "write_report"

@@ -10,13 +10,16 @@ import os
 import random
 import re
 import sys
-import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from common.errors import PipelineError
+from common.io import atomic_write, with_io_retry, write_json
+from common.log import configure_logging, log, to_iso
 from transform.mask import count_pii
 
 # ---------------------------------------------------------------------------
@@ -55,8 +58,6 @@ MOOD_VARIATION_MIN_PCT = 0.30
 NEAR_LIMIT_MARGIN = 0.02  # warn within 2 points of a DC-R10/R11/R14 floor/ceiling
 
 MAX_SCHEMA_ERRORS = 50
-IO_RETRY_ATTEMPTS = 3
-IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)
 
 REPORT_VERSION = "ig-1"
 CONTRACT_VERSION = "dc-1"
@@ -69,22 +70,17 @@ logger = logging.getLogger("ingest.validate")
 # ---------------------------------------------------------------------------
 
 
-class CorpusPathError(Exception):
+class CorpusPathError(PipelineError):
     """F0 usage error (IG-R01/IG-R02). Never becomes part of a report."""
 
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
 
-
-class CorpusIOError(Exception):
+class CorpusIOError(PipelineError):
     """I/O failure after exhausting retries (IG-R15)."""
 
-    def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
+
+_log = partial(log, logger)
+_configure_logging = partial(configure_logging, logger)
+_with_io_retry = partial(with_io_retry, logger=logger, error=lambda detail: CorpusIOError("IG_R15_IO_FAILED", detail))
 
 
 # ---------------------------------------------------------------------------
@@ -163,31 +159,6 @@ def sha256_and_size(path: Path) -> tuple[str, int]:
             h.update(chunk)
             size += len(chunk)
     return h.hexdigest(), size
-
-
-def _with_io_retry(operation: str, func: Any) -> Any:
-    """Retries an I/O callable 3x with 1s/2s/4s backoff on OSError (IG-R15)."""
-    last_exc: OSError | None = None
-    for attempt, backoff in enumerate((0, *IO_RETRY_BACKOFF_SECONDS), start=1):
-        if backoff:
-            time.sleep(backoff)
-        try:
-            return func()
-        except OSError as exc:
-            last_exc = exc
-            logger.warning(
-                json.dumps(
-                    {
-                        "ts": _now_iso(),
-                        "level": "WARNING",
-                        "event": "io_retry",
-                        "attempt": attempt,
-                        "operation": operation,
-                        "errno": exc.errno,
-                    }
-                )
-            )
-    raise CorpusIOError("IG_R15_IO_FAILED", f"{operation} failed after retries: {last_exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -490,8 +461,8 @@ def validate_corpus(path: str | Path, skip_composition: bool = False) -> Validat
     finished_at = datetime.now(timezone.utc)
     run = {
         "run_id": uuid.uuid4().hex[:8],
-        "started_at": _to_iso(started_at),
-        "finished_at": _to_iso(finished_at),
+        "started_at": to_iso(started_at),
+        "finished_at": to_iso(finished_at),
         "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
         "tool": "ingest.validate",
         "python": sys.version.split()[0],
@@ -702,15 +673,7 @@ def _evaluate_composition(
 
 
 def _write_report_atomic(report: dict[str, Any], dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-
-    def _write() -> None:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, sort_keys=True, ensure_ascii=False)
-        os.replace(tmp, dest)
-
-    _with_io_retry("write_report", _write)
+    _with_io_retry("write_report", lambda: atomic_write(dest, lambda tmp: write_json(report, tmp)))
 
 
 def _write_review_sample(path: Path, dest: Path, n: int, seed: int) -> Path:
@@ -723,52 +686,6 @@ def _write_review_sample(path: Path, dest: Path, n: int, seed: int) -> Path:
         for m in sample:
             f.write(json.dumps(asdict(m), ensure_ascii=False) + "\n")
     return dest
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    return _to_iso(datetime.now(timezone.utc))
-
-
-def _to_iso(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload = {
-            "ts": _now_iso(),
-            "level": record.levelname,
-            "event": record.getMessage(),
-        }
-        extra = getattr(record, "fields", None)
-        if extra:
-            payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False)
-
-
-class _TextFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        extra = getattr(record, "fields", None)
-        suffix = f" {extra}" if extra else ""
-        return f"{record.levelname:<7} {record.getMessage()}{suffix}"
-
-
-def _configure_logging(log_format: str, log_level: str) -> None:
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if log_format == "json" else _TextFormatter())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-    logger.propagate = False
-
-
-def _log(level: int, event: str, **fields: Any) -> None:
-    logger.log(level, event, extra={"fields": {"run_id": fields.pop("run_id", None), **fields}})
 
 
 # ---------------------------------------------------------------------------
