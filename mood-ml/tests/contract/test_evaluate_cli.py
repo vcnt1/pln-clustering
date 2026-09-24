@@ -3,8 +3,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
+import common.io as common_io
 import evaluate.metrics as evaluate_cli
 import train.train as train_cli
 from tests.conftest import build_synthetic_dataset, train_and_stage
@@ -105,6 +107,34 @@ def test_rerun_produces_the_same_gate_outcome(corpus_root: Path, train_config: d
 
     assert code1 == code2
     assert eval_json_1["metrics"] == eval_json_2["metrics"]
+
+
+def test_io_retry_on_read_carries_the_run_id(
+    corpus_root: Path, train_config: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    build_synthetic_dataset(corpus_root, "ds-retry", signal="strong")
+    config_path = _write_config(corpus_root, train_config)
+    train_and_stage(corpus_root, "ds-retry", train_config)
+    monkeypatch.setattr(common_io.time, "sleep", lambda _seconds: None)
+
+    real_load = evaluate_cli.joblib.load
+    calls = {"n": 0}
+
+    def _fails_once(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(13, "locked")
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(evaluate_cli.joblib, "load", _fails_once)
+
+    assert _run(corpus_root, "ds-retry", config_path) == 0
+    # Spec 06 §5: run_id is mandatory on every line, io_retry included.
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line]
+    started = next(e for e in events if e["event"] == "evaluate_started")
+    retry = next(e for e in events if e["event"] == "io_retry")
+    assert retry["operation"] == "load_baseline"
+    assert retry["run_id"] == started["run_id"]
 
 
 def test_no_duckdb_reference_in_evaluate() -> None:

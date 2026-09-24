@@ -111,6 +111,7 @@ def evaluate_candidate(
     fingerprint: str | None = None,
     staging_dir: str | Path = Path("models/_staging"),
     datasets_dir: str | Path = Path("data/datasets"),
+    run_id: str | None = None,
 ) -> EvalResult:
     """Returns an EvalResult. Writes nothing; does not decide an exit code
     (same separation as validate_corpus/build_labels/build_dataset)."""
@@ -130,11 +131,11 @@ def evaluate_candidate(
     if not (baseline_path.exists() and candidate_path.exists() and manifest_path.exists()):
         raise EvaluateGateError("EV_R01_GATE_STAGING_NOT_OK", f"incomplete staging at {staging}")
 
-    baseline = _with_io_retry("load_baseline", lambda: joblib.load(baseline_path))
-    candidate = _with_io_retry("load_candidate", lambda: joblib.load(candidate_path))
+    baseline = _with_io_retry("load_baseline", lambda: joblib.load(baseline_path), run_id)
+    candidate = _with_io_retry("load_candidate", lambda: joblib.load(candidate_path), run_id)
 
     test_path = datasets_dir / dataset_id / "test.parquet"
-    test_df = _with_io_retry("read_test_parquet", lambda: pd.read_parquet(test_path)).reset_index(drop=True)
+    test_df = _with_io_retry("read_test_parquet", lambda: pd.read_parquet(test_path), run_id).reset_index(drop=True)
 
     y_true = test_df["label_score"].to_numpy()
     candidate_pred = np.array([clip_score(v) for v in candidate.predict(test_df)])
@@ -256,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = evaluate_candidate(
-            args.dataset_id, config, staging_dir=args.staging_dir, datasets_dir=args.datasets_dir
+            args.dataset_id, config, staging_dir=args.staging_dir, datasets_dir=args.datasets_dir, run_id=run_id
         )
     except EvaluateGateError as exc:
         _log(logging.ERROR, "gate_blocked", run_id=run_id, reason=exc.code, detail=exc.detail)

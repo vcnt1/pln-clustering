@@ -140,6 +140,7 @@ def build_candidate(
     config: dict[str, Any],
     datasets_dir: str | Path = Path("data/datasets"),
     staging_dir: str | Path = Path("models/_staging"),
+    run_id: str | None = None,
 ) -> TrainResult:
     """Returns a TrainResult. Writes nothing; does not decide an exit code
     (same separation as validate_corpus/build_labels/build_dataset)."""
@@ -179,17 +180,17 @@ def build_candidate(
     manifest_path = staging / "train_manifest.json"
 
     if baseline_path.exists() and candidate_path.exists() and manifest_path.exists():
-        baseline = _with_io_retry("load_baseline", lambda: joblib.load(baseline_path))
-        candidate = _with_io_retry("load_candidate", lambda: joblib.load(candidate_path))
+        baseline = _with_io_retry("load_baseline", lambda: joblib.load(baseline_path), run_id)
+        candidate = _with_io_retry("load_candidate", lambda: joblib.load(candidate_path), run_id)
         train_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         return TrainResult(baseline, candidate, train_manifest, staging, reused=True)
 
     # F3 — carga
     train_df = _with_io_retry(
-        "read_train_parquet", lambda: pd.read_parquet(datasets_dir / dataset_id / "train.parquet")
+        "read_train_parquet", lambda: pd.read_parquet(datasets_dir / dataset_id / "train.parquet"), run_id
     )
     validation_df = _with_io_retry(
-        "read_validation_parquet", lambda: pd.read_parquet(datasets_dir / dataset_id / "validation.parquet")
+        "read_validation_parquet", lambda: pd.read_parquet(datasets_dir / dataset_id / "validation.parquet"), run_id
     )
     y_train = train_df["label_score"].to_numpy()
 
@@ -277,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = build_candidate(
-            args.dataset_id, config, datasets_dir=args.datasets_dir, staging_dir=args.staging_dir
+            args.dataset_id, config, datasets_dir=args.datasets_dir, staging_dir=args.staging_dir, run_id=run_id
         )
     except TrainGateError as exc:
         _log(logging.ERROR, "gate_blocked", run_id=run_id, reason=exc.code, detail=exc.detail)
