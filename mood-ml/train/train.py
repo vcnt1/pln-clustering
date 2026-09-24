@@ -59,6 +59,13 @@ class TrainSanityError(Exception):
         self.detail = detail
 
 
+class TrainConfigError(Exception):
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
 class TrainIOError(Exception):
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(detail)
@@ -163,7 +170,13 @@ def build_candidate(
     dataset_json_path = datasets_dir / dataset_id / "dataset.json"
     if not dataset_json_path.exists():
         raise TrainGateError("TN_R01_GATE_DATASET_NOT_OK", f"dataset.json not found for {dataset_id}")
-    dataset_json = json.loads(dataset_json_path.read_text(encoding="utf-8"))
+    try:
+        dataset_json = json.loads(dataset_json_path.read_text(encoding="utf-8"))
+        test_rows = dataset_json["row_counts"]["test"]["rows"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise TrainGateError(
+            "TN_R01_GATE_DATASET_NOT_OK", f"dataset.json unreadable or incomplete for {dataset_id}: {exc!r}"
+        ) from exc
     for split in ("train", "validation", "test"):
         if not (datasets_dir / dataset_id / f"{split}.parquet").exists():
             raise TrainGateError("TN_R01_GATE_DATASET_NOT_OK", f"{split}.parquet missing for {dataset_id}")
@@ -171,7 +184,10 @@ def build_candidate(
     train_config = dict(config.get("train", {}))
     algorithm = train_config.pop("algorithm", "tfidf-ridge")
     if algorithm not in SUPPORTED_ALGORITHMS:
-        raise ValueError(f"unsupported algorithm: {algorithm!r} (only {sorted(SUPPORTED_ALGORITHMS)} implemented)")
+        raise TrainConfigError(
+            "TN_R17_UNSUPPORTED_ALGORITHM",
+            f"unsupported algorithm: {algorithm!r} (only {sorted(SUPPORTED_ALGORITHMS)} implemented)",
+        )
 
     # F2 — identidade e idempotência
     dataset_sha256 = dataset_parquet_hashes(datasets_dir, dataset_id)
@@ -225,7 +241,7 @@ def build_candidate(
         "row_counts": {
             "train": len(train_df),
             "validation": len(validation_df),
-            "test": dataset_json["row_counts"]["test"]["rows"],
+            "test": test_rows,
         },
         "validation_mae_candidate": validation_mae,
         "code_commit": _git_commit(),
@@ -344,8 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     except TrainSanityError as exc:
         _log(logging.ERROR, "sanity_check_failed", run_id=run_id, model="candidate", detail=exc.detail)
         return 4
-    except ValueError as exc:
-        _log(logging.ERROR, "gate_blocked", run_id=run_id, reason="unsupported_algorithm", detail=str(exc))
+    except TrainConfigError as exc:
+        _log(logging.ERROR, "config_invalid", run_id=run_id, reason=exc.code, detail=exc.detail)
         return 2
     except TrainIOError as exc:
         _log(logging.ERROR, "io_failed", run_id=run_id, detail=exc.detail)

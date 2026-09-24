@@ -8,6 +8,7 @@ import pytest
 from evaluate.metrics import compute_training_fingerprint
 from tests.conftest import build_synthetic_dataset
 from train.train import (
+    TrainConfigError,
     TrainGateError,
     TrainSanityError,
     _build_pipeline,
@@ -106,11 +107,30 @@ def test_different_hyperparameters_produce_different_staging_dir(corpus_root: Pa
     assert result1.staging_dir != result2.staging_dir
 
 
-def test_unsupported_algorithm_raises_value_error(corpus_root: Path, train_config: dict) -> None:
+def test_unsupported_algorithm_raises_config_error(corpus_root: Path, train_config: dict) -> None:
     build_synthetic_dataset(corpus_root, "ds-c")
     bad_config = {**train_config, "train": {**train_config["train"], "algorithm": "embeddings-ridge"}}
-    with pytest.raises(ValueError):
+    with pytest.raises(TrainConfigError) as exc:
         build_candidate("ds-c", bad_config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging")
+    assert exc.value.code == "TN_R17_UNSUPPORTED_ALGORITHM"
+
+
+def test_gate_blocked_when_dataset_json_is_corrupted(corpus_root: Path, train_config: dict) -> None:
+    dataset_dir = build_synthetic_dataset(corpus_root, "ds-corrupt")
+    (dataset_dir / "dataset.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(TrainGateError) as exc:
+        build_candidate("ds-corrupt", train_config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging")
+    assert exc.value.code == "TN_R01_GATE_DATASET_NOT_OK"
+
+
+def test_gate_blocked_when_dataset_json_lacks_row_counts(corpus_root: Path, train_config: dict) -> None:
+    dataset_dir = build_synthetic_dataset(corpus_root, "ds-partial")
+    (dataset_dir / "dataset.json").write_text('{"dataset_id": "ds-partial"}', encoding="utf-8")
+
+    with pytest.raises(TrainGateError) as exc:
+        build_candidate("ds-partial", train_config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging")
+    assert exc.value.code == "TN_R01_GATE_DATASET_NOT_OK"
 
 
 def test_sanity_check_catches_non_finite_prediction(
