@@ -196,6 +196,7 @@ def run_inference(pipeline: Any, history: list[HistoryMessage]) -> float:
     row = pd.DataFrame([{
         "text_clean": features["text_clean"],
         "context_clean": features["context_clean"],
+        # Legado: só modelos do antigo mvp_train leem esta coluna; remover quando nenhum ambiente servir um deles.
         "context_text": " ".join(features["context_clean"]),
     }])
     raw = pipeline.predict(row)[0]
