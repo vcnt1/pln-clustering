@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import './App.css'
 import { getCustomerMood, sendMessage } from './services/api'
@@ -18,7 +18,7 @@ function createConversation(): Conversation {
   return {
     id: `conv-${id}`,
     customerId: `customer-${id}`,
-    customerName: `Customer ${shortId}`,
+    customerName: `Hóspede ${shortId}`,
     initials: shortId.slice(0, 2),
     room: '',
     score: null,
@@ -34,6 +34,14 @@ function App() {
   const [draft, setDraft] = useState('')
   const [sendRole, setSendRole] = useState<Role>('agent')
   const selectedConversation = conversations.find(({ id }) => id === selectedId) ?? null
+  const messageAreaRef = useRef<HTMLDivElement>(null)
+
+  // Jump to the newest message whenever the thread grows or the selection changes.
+  useEffect(() => {
+    const el = messageAreaRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [selectedConversation?.messages.length, selectedId])
 
   function handleAddConversation() {
     const conversation = createConversation()
@@ -61,6 +69,11 @@ function App() {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       event.currentTarget.form?.requestSubmit()
+      return
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault()
+      setSendRole((current) => (current === 'agent' ? 'customer' : 'agent'))
     }
   }
 
@@ -79,25 +92,24 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand-row"><div className="brand-mark">H</div><div><p className="eyebrow">Front desk</p><h1>Haven desk</h1></div><button className="icon-button" type="button" aria-label="Open workspace menu">•••</button></div>
-        <div className="inbox-heading"><div><p className="eyebrow">Your inbox</p><h2>Conversations <span>{conversations.length}</span></h2></div><button className="compose-button" type="button" aria-label="Start a new conversation" onClick={handleAddConversation}>+</button></div>
-        <label className="search-box"><span aria-hidden="true">⌕</span><input type="search" placeholder="Search guests" aria-label="Search guests" /><kbd>/</kbd></label>
-        <nav className="conversation-list" aria-label="Conversations">
-          {conversations.length === 0 && <p className="empty-hint">No conversations yet. Click + to add one.</p>}
+        <div className="brand-row"><div className="brand-mark">E</div><div><p className="eyebrow">Estada</p><h1>Central de Hóspedes</h1></div><button className="icon-button" type="button" aria-label="Abrir menu do workspace">•••</button></div>
+        <div className="inbox-heading"><div><p className="eyebrow">Suas reservas</p><h2>Hóspedes <span>{conversations.length}</span></h2></div><button className="compose-button" type="button" aria-label="Iniciar nova conversa" onClick={handleAddConversation}>+</button></div>
+        <label className="search-box"><span aria-hidden="true">⌕</span><input type="search" placeholder="Buscar hóspedes" aria-label="Buscar hóspedes" /><kbd>/</kbd></label>
+        <nav className="conversation-list" aria-label="Conversas">
+          {conversations.length === 0 && <p className="empty-hint">Nenhum hóspede ainda. Clique em + para adicionar.</p>}
           {conversations.map((conversation) => (
             <button className={`conversation-item ${conversation.id === selectedId ? 'is-selected' : ''}`} key={conversation.id} type="button" onClick={() => setSelectedId(conversation.id)}>
               <span className="avatar">{conversation.initials}</span>
               <span className="conversation-copy">
                 <span className="conversation-name">{getMoodEmoji(conversation.score, conversation.scale)} {conversation.customerName}</span>
-                <span className="conversation-preview">{conversation.messages.at(-1)?.text ?? 'No messages yet'}</span>
+                <span className="conversation-preview">{conversation.messages.at(-1)?.text ?? 'Nenhuma mensagem ainda'}</span>
               </span>
               <span className="conversation-time">{conversation.lastSeen}</span>
             </button>
           ))}
         </nav>
-        <div className="sidebar-footer"><div className="profile-avatar">AM</div><div><strong>Alex Morgan</strong><span>On duty · Concierge</span></div><button className="icon-button" type="button" aria-label="Open profile settings">⚙</button></div>
       </aside>
-      <section className="chat-panel" aria-label="Selected conversation">
+      <section className="chat-panel" aria-label="Conversa selecionada">
         {selectedConversation ? (
           <>
             <header className="chat-header">
@@ -105,31 +117,31 @@ function App() {
                 <div className="avatar avatar-large">{selectedConversation.initials}</div>
                 <div>
                   <div className="name-line"><h2>{selectedConversation.customerName}</h2><span className="online-dot" /><span className="online-label">Online</span></div>
-                  <p>{selectedConversation.room || 'No room assigned yet'}</p>
+                  <p>{selectedConversation.room || 'Nenhum quarto atribuído ainda'}</p>
                 </div>
               </div>
-              <div className="header-actions"><button className="secondary-button" type="button" onClick={refreshMood}><span>↻</span> Refresh mood</button><button className="icon-button outlined" type="button" aria-label="More conversation actions">•••</button></div>
+              <div className="header-actions"><button className="secondary-button" type="button" onClick={refreshMood}><span>↻</span> Atualizar humor</button><button className="icon-button outlined" type="button" aria-label="Mais ações da conversa">•••</button></div>
             </header>
             <div className="mood-strip">
               <div className="mood-icon">{getMoodEmoji(selectedConversation.score, selectedConversation.scale)}</div>
-              <div><span className="eyebrow">Current guest mood</span><strong>{getMoodLabel(selectedConversation.score, selectedConversation.scale)}</strong></div>
-              <div className="mood-meter" aria-label={`Mood score ${selectedConversation.score ?? 'unavailable'}`}><span style={{ width: selectedConversation.score === null ? '0%' : `${((selectedConversation.score + 1) / 2) * 100}%` }} /></div>
+              <div><span className="eyebrow">Humor atual do hóspede</span><strong>{getMoodLabel(selectedConversation.score, selectedConversation.scale)}</strong></div>
+              <div className="mood-meter" aria-label={`Pontuação de humor ${selectedConversation.score ?? 'indisponível'}`}><span style={{ width: selectedConversation.score === null ? '0%' : `${((selectedConversation.score + 1) / 2) * 100}%` }} /></div>
               <span className="mood-score">{selectedConversation.score === null ? '—' : `${selectedConversation.score > 0 ? '+' : ''}${selectedConversation.score.toFixed(2)}`}</span>
               <span className="model-tag">ML v0.1</span>
             </div>
-            <div className="message-area">
+            <div className="message-area" ref={messageAreaRef}>
               {selectedConversation.messages.length === 0 ? (
-                <p className="empty-hint">No messages yet. Say hello to get the conversation started.</p>
+                <p className="empty-hint">Nenhuma mensagem ainda. Diga oi para começar o atendimento.</p>
               ) : (
                 <>
-                  <div className="date-divider"><span>Today</span></div>
+                  <div className="date-divider"><span>Hoje</span></div>
                   <div className="messages">
                     {selectedConversation.messages.map((message) => (
                       <div className={`message-row ${message.role}`} key={message.id}>
                         {message.role === 'customer' && <span className="avatar avatar-small">{selectedConversation.initials}</span>}
                         <div className="message-content">
                           <div className="message-bubble">{message.text}</div>
-                          <span className="message-time">{message.time}{message.role === 'agent' && '  ·  Read'}</span>
+                          <span className="message-time">{message.time}{message.role === 'agent' && '  ·  Lida'}</span>
                         </div>
                       </div>
                     ))}
@@ -137,17 +149,17 @@ function App() {
                 </>
               )}
             </div>
-            <div className="composer-role-toggle" role="radiogroup" aria-label="Send message as">
-              <button type="button" className={sendRole === 'agent' ? 'is-active' : ''} onClick={() => setSendRole('agent')} aria-pressed={sendRole === 'agent'}>Agent reply</button>
-              <button type="button" className={sendRole === 'customer' ? 'is-active' : ''} onClick={() => setSendRole('customer')} aria-pressed={sendRole === 'customer'}>Simulate customer (test)</button>
+            <div className="composer-role-toggle" role="radiogroup" aria-label="Enviar mensagem como">
+              <button type="button" className={sendRole === 'agent' ? 'is-active' : ''} onClick={() => setSendRole('agent')} aria-pressed={sendRole === 'agent'}>Resposta da recepção</button>
+              <button type="button" className={sendRole === 'customer' ? 'is-active' : ''} onClick={() => setSendRole('customer')} aria-pressed={sendRole === 'customer'}>Simular hóspede (teste)</button>
             </div>
             <form className="composer" onSubmit={handleSend}>
-              <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Write a reply..." aria-label="Message" rows={1} />
-              <div className="composer-actions"><span className="composer-hint">Enter to send · Shift+Enter for newline</span><button className="send-button" type="submit" disabled={!draft.trim()} aria-label="Send message">↑</button></div>
+              <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Escreva uma resposta..." aria-label="Mensagem" rows={1} />
+              <div className="composer-actions"><span className="composer-hint">Enter para enviar · Shift+Enter para nova linha · Tab para trocar de papel</span><button className="send-button" type="submit" disabled={!draft.trim()} aria-label="Enviar mensagem">↑</button></div>
             </form>
           </>
         ) : (
-          <div className="empty-panel"><p>Select a conversation or click + to add a new customer.</p></div>
+          <div className="empty-panel"><p>Selecione uma conversa ou clique em + para adicionar um novo hóspede.</p></div>
         )}
       </section>
     </main>

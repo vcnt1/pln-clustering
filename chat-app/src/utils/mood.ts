@@ -13,11 +13,11 @@ export function getMoodEmoji(score: number | null, scale: string): string {
 }
 
 export function getMoodLabel(score: number | null, scale: string): string {
-  if (score === null) return 'No mood data yet'
+  if (score === null) return 'Sem dados de humor ainda'
   const normalizedScore = normalizeScore(score, scale)
-  if (normalizedScore <= -0.6) return 'Very negative'
-  if (normalizedScore <= -0.2) return 'Negative'
-  if (normalizedScore < 0.2) return 'Neutral'
-  if (normalizedScore < 0.6) return 'Positive'
-  return 'Very positive'
+  if (normalizedScore <= -0.6) return 'Muito negativo'
+  if (normalizedScore <= -0.2) return 'Negativo'
+  if (normalizedScore < 0.2) return 'Neutro'
+  if (normalizedScore < 0.6) return 'Positivo'
+  return 'Muito positivo'
 }
