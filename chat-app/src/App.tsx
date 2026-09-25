@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import './App.css'
-import { getCustomerMood, sendMessage } from './services/api'
+import type { ConversationSummaryDto } from './services/api'
+import { deleteConversation, formatTime, getConversations, getCustomerMood, sendMessage } from './services/api'
 import { getMoodEmoji, getMoodLabel } from './utils/mood'
 
 type Role = 'agent' | 'customer'
@@ -28,6 +29,25 @@ function createConversation(): Conversation {
   }
 }
 
+// Guest name/initials are never persisted server-side, only derived client-side from the id.
+function toConversation(row: ConversationSummaryDto): Conversation {
+  const shortId = row.customer_id.replace(/^customer-/, '').slice(0, 4).toUpperCase()
+  const lastMessage = row.messages.at(-1)
+  return {
+    id: row.conversation_id,
+    customerId: row.customer_id,
+    customerName: `Hóspede ${shortId}`,
+    initials: shortId.slice(0, 2),
+    room: '',
+    score: row.score,
+    scale: row.scale ?? '-1 to 1',
+    lastSeen: lastMessage ? formatTime(lastMessage.sent_at) : '',
+    messages: row.messages.map((message) => ({
+      id: message.message_id, role: message.role, text: message.text, time: formatTime(message.sent_at),
+    })),
+  }
+}
+
 function App() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -35,6 +55,22 @@ function App() {
   const [sendRole, setSendRole] = useState<Role>('agent')
   const selectedConversation = conversations.find(({ id }) => id === selectedId) ?? null
   const messageAreaRef = useRef<HTMLDivElement>(null)
+
+  // Hydrate from DuckDB-backed mood-api on load so reloads don't lose history.
+  useEffect(() => {
+    let cancelled = false
+    getConversations()
+      .then((rows) => {
+        if (cancelled) return
+        setConversations(rows.map(toConversation))
+      })
+      .catch(() => {
+        // Best-effort hydration: an empty inbox is a safe fallback if mood-api is unreachable.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Jump to the newest message whenever the thread grows or the selection changes.
   useEffect(() => {
@@ -47,6 +83,17 @@ function App() {
     const conversation = createConversation()
     setConversations((current) => [conversation, ...current])
     setSelectedId(conversation.id)
+  }
+
+  async function handleDeleteConversation(conversationId: string) {
+    setConversations((current) => current.filter((conversation) => conversation.id !== conversationId))
+    setSelectedId((current) => (current === conversationId ? null : current))
+    try {
+      await deleteConversation(conversationId)
+    } catch {
+      // The conversation was already removed from the UI; a failed backend
+      // delete just means it may reappear after the next reload.
+    }
   }
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
@@ -92,20 +139,23 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand-row"><div className="brand-mark">E</div><div><p className="eyebrow">Estada</p><h1>Central de Hóspedes</h1></div><button className="icon-button" type="button" aria-label="Abrir menu do workspace">•••</button></div>
+        <div className="brand-row"><div className="brand-mark">Unifor</div><h1>Central de Hóspedes</h1></div>
         <div className="inbox-heading"><div><p className="eyebrow">Suas reservas</p><h2>Hóspedes <span>{conversations.length}</span></h2></div><button className="compose-button" type="button" aria-label="Iniciar nova conversa" onClick={handleAddConversation}>+</button></div>
         <label className="search-box"><span aria-hidden="true">⌕</span><input type="search" placeholder="Buscar hóspedes" aria-label="Buscar hóspedes" /><kbd>/</kbd></label>
         <nav className="conversation-list" aria-label="Conversas">
           {conversations.length === 0 && <p className="empty-hint">Nenhum hóspede ainda. Clique em + para adicionar.</p>}
           {conversations.map((conversation) => (
-            <button className={`conversation-item ${conversation.id === selectedId ? 'is-selected' : ''}`} key={conversation.id} type="button" onClick={() => setSelectedId(conversation.id)}>
-              <span className="avatar">{conversation.initials}</span>
-              <span className="conversation-copy">
-                <span className="conversation-name">{getMoodEmoji(conversation.score, conversation.scale)} {conversation.customerName}</span>
-                <span className="conversation-preview">{conversation.messages.at(-1)?.text ?? 'Nenhuma mensagem ainda'}</span>
-              </span>
-              <span className="conversation-time">{conversation.lastSeen}</span>
-            </button>
+            <div className={`conversation-item ${conversation.id === selectedId ? 'is-selected' : ''}`} key={conversation.id}>
+              <button className="conversation-item-select" type="button" onClick={() => setSelectedId(conversation.id)}>
+                <span className="avatar">{conversation.initials}</span>
+                <span className="conversation-copy">
+                  <span className="conversation-name">{getMoodEmoji(conversation.score, conversation.scale)} {conversation.customerName}</span>
+                  <span className="conversation-preview">{conversation.messages.at(-1)?.text ?? 'Nenhuma mensagem ainda'}</span>
+                </span>
+                <span className="conversation-time">{conversation.lastSeen}</span>
+              </button>
+              <button className="icon-button conversation-delete" type="button" aria-label={`Excluir conversa de ${conversation.customerName}`} onClick={() => handleDeleteConversation(conversation.id)}>×</button>
+            </div>
           ))}
         </nav>
       </aside>
@@ -120,7 +170,7 @@ function App() {
                   <p>{selectedConversation.room || 'Nenhum quarto atribuído ainda'}</p>
                 </div>
               </div>
-              <div className="header-actions"><button className="secondary-button" type="button" onClick={refreshMood}><span>↻</span> Atualizar humor</button><button className="icon-button outlined" type="button" aria-label="Mais ações da conversa">•••</button></div>
+              <div className="header-actions"><button className="secondary-button" type="button" onClick={refreshMood}><span>↻</span> Atualizar humor</button></div>
             </header>
             <div className="mood-strip">
               <div className="mood-icon">{getMoodEmoji(selectedConversation.score, selectedConversation.scale)}</div>
@@ -150,8 +200,8 @@ function App() {
               )}
             </div>
             <div className="composer-role-toggle" role="radiogroup" aria-label="Enviar mensagem como">
+              <button type="button" className={sendRole === 'customer' ? 'is-active' : ''} onClick={() => setSendRole('customer')} aria-pressed={sendRole === 'customer'}>Simular hóspede</button>
               <button type="button" className={sendRole === 'agent' ? 'is-active' : ''} onClick={() => setSendRole('agent')} aria-pressed={sendRole === 'agent'}>Resposta da recepção</button>
-              <button type="button" className={sendRole === 'customer' ? 'is-active' : ''} onClick={() => setSendRole('customer')} aria-pressed={sendRole === 'customer'}>Simular hóspede (teste)</button>
             </div>
             <form className="composer" onSubmit={handleSend}>
               <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Escreva uma resposta..." aria-label="Mensagem" rows={1} />

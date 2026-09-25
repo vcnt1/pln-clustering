@@ -15,7 +15,52 @@ tags:
     description: Ingesting chat messages
   - name: mood
     description: Reading the computed mood score
+  - name: conversations
+    description: Reading persisted conversations and their messages
 paths:
+  /v1alpha1/conversations:
+    get:
+      tags: [conversations]
+      summary: List persisted conversations
+      description: |
+        Returns every conversation stored in DuckDB, each with its full message
+        history (oldest first) and its latest computed mood score, if any.
+        Ordered by most recently active conversation first.
+      operationId: listConversations
+      responses:
+        '200':
+          description: Persisted conversations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConversationSummary'
+  /v1alpha1/conversations/{conversation_id}:
+    delete:
+      tags: [conversations]
+      summary: Delete a persisted conversation
+      description: |
+        Permanently deletes the conversation and its messages, mood scores,
+        and inference failures. Also deletes the owning customer row if this
+        was their only conversation.
+      operationId: deleteConversation
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Identifier of the conversation to delete
+      responses:
+        '204':
+          description: Conversation deleted
+        '404':
+          description: No conversation found with this id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
   /v1alpha1/ingest:
     post:
       tags: [messages]
@@ -183,3 +228,41 @@ components:
             - type: array
               items:
                 type: object
+    ConversationMessage:
+      type: object
+      required: [message_id, role, text, sent_at]
+      properties:
+        message_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [customer, agent]
+        text:
+          type: string
+        sent_at:
+          type: string
+          format: date-time
+    ConversationSummary:
+      type: object
+      required: [conversation_id, customer_id, last_message_at, messages]
+      properties:
+        conversation_id:
+          type: string
+        customer_id:
+          type: string
+        last_message_at:
+          type: string
+          format: date-time
+        score:
+          type: [number, "null"]
+          format: double
+          minimum: -1
+          maximum: 1
+        scale:
+          type: [string, "null"]
+          example: "-1 to 1"
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConversationMessage'

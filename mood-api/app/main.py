@@ -16,7 +16,7 @@ _allowed_origins = os.environ.get("MOOD_API_ALLOWED_ORIGINS", "http://localhost:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
 

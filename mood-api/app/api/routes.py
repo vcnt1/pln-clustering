@@ -3,11 +3,17 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import duckdb
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from app.db.connection import get_connection
 from app.ml_client import HistoryMessage, InferenceError, InferRequest, call_infer
-from app.models.schemas import IngestRequest, IngestResponse, MoodResponse
+from app.models.schemas import (
+    ConversationMessage,
+    ConversationSummary,
+    IngestRequest,
+    IngestResponse,
+    MoodResponse,
+)
 
 router = APIRouter()
 
@@ -83,6 +89,79 @@ def ingest_message(payload: IngestRequest) -> IngestResponse:
         con.close()
 
     return IngestResponse(status="ok", message_id=message_id)
+
+
+@router.get("/conversations", response_model=list[ConversationSummary])
+def list_conversations() -> list[ConversationSummary]:
+    con = get_connection()
+    try:
+        conversation_rows = con.execute(
+            "SELECT conversation_id, customer_id, last_message_at FROM conversations "
+            "ORDER BY last_message_at DESC"
+        ).fetchall()
+
+        summaries = []
+        for conversation_id, customer_id, last_message_at in conversation_rows:
+            message_rows = con.execute(
+                "SELECT message_id, role, text, sent_at FROM messages "
+                "WHERE conversation_id = ? ORDER BY sent_at ASC, received_at ASC",
+                [conversation_id],
+            ).fetchall()
+            # data-model.md §7: scope the mood score to the owning conversation.
+            mood_row = con.execute(
+                "SELECT score, scale FROM v_conversation_mood_latest WHERE conversation_id = ?",
+                [conversation_id],
+            ).fetchone()
+
+            summaries.append(
+                ConversationSummary(
+                    conversation_id=conversation_id,
+                    customer_id=customer_id,
+                    last_message_at=last_message_at,
+                    score=mood_row[0] if mood_row else None,
+                    scale=mood_row[1] if mood_row else None,
+                    messages=[
+                        ConversationMessage(message_id=row[0], role=row[1], text=row[2], sent_at=row[3])
+                        for row in message_rows
+                    ],
+                )
+            )
+        return summaries
+    finally:
+        con.close()
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str) -> Response:
+    con = get_connection()
+    try:
+        existing = con.execute(
+            "SELECT customer_id FROM conversations WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        customer_id = existing[0]
+
+        try:
+            con.execute("BEGIN TRANSACTION")
+            # Facts are append-only elsewhere (P2), but a full conversation delete
+            # must cascade to keep DuckDB free of orphaned rows.
+            con.execute("DELETE FROM inference_failures WHERE conversation_id = ?", [conversation_id])
+            con.execute("DELETE FROM mood_scores WHERE conversation_id = ?", [conversation_id])
+            con.execute("DELETE FROM messages WHERE conversation_id = ?", [conversation_id])
+            con.execute("DELETE FROM conversations WHERE conversation_id = ?", [conversation_id])
+            remaining = con.execute(
+                "SELECT count(*) FROM conversations WHERE customer_id = ?", [customer_id]
+            ).fetchone()[0]
+            if remaining == 0:
+                con.execute("DELETE FROM customers WHERE customer_id = ?", [customer_id])
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    finally:
+        con.close()
+    return Response(status_code=204)
 
 
 @router.get("/customer/{customer_id}/mood", response_model=MoodResponse)
