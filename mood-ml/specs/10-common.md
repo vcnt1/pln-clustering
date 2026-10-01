@@ -1,6 +1,6 @@
 # 10 — Infraestrutura Transversal (`common/`)
 
-**Status:** Proposta · **Versão da spec:** `cm-1` · **Data:** 2026-09-24
+**Status:** Aceita · **Versão da spec:** `cm-1` · **Data:** 2026-09-24
 **Implementa:** correção F3 do code review de 2026-09-24. Oito módulos repetiam retry de I/O, log estruturado, classes de erro e escrita atômica.
 **Depende de:** nenhuma. Não importa nenhum outro módulo do mood-ml.
 **Consumido por:** [02](02-ingest-validate.md), [03](03-labels.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md), [09](09-orquestracao-ci.md)
@@ -25,6 +25,7 @@ As cópias já tinham divergido. No ingest, o evento `io_retry` saía com o JSON
 | | `with_io_retry(operation, func, run_id=None, *, logger, error)` | Chama `func()`. Em `OSError`, loga `io_retry` (`attempt`, `operation`, `errno`) e retenta após 1s, 2s e 4s: são 4 tentativas no total. Esgotadas, levanta `error(detail)`, em que `error` é uma fábrica da exceção da camada. Outras exceções propagam sem retentativa. |
 | | `atomic_write(dest, write_tmp)` | Cria o diretório pai, chama `write_tmp(<dest>.tmp)` e faz `os.replace` para `dest`. Não faz retentativa própria: quem chama embrulha em `with_io_retry`. |
 | | `write_json(payload, path)` | `json.dump` com `indent=2, sort_keys=True, ensure_ascii=False`. |
+| | `write_json_atomic(payload, dest)` | `atomic_write` com `write_json`. Como `atomic_write`, não faz retentativa própria. |
 | `common/log.py` | `now_iso()`, `to_iso(dt)` | ISO-8601 UTC, com milissegundos e sufixo `Z`. |
 | | `JsonFormatter`, `TextFormatter` | Um objeto JSON por linha (`ts`, `level`, `event` + campos), ou texto legível para `--log-format text`. |
 | | `configure_logging(logger, log_format, log_level)` | Um único *handler* em `stderr`, sem propagação. Chamar de novo substitui o *handler* em vez de duplicar. |
@@ -58,8 +59,9 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - **CA-05** `atomic_write` com sucesso → `dest` com o conteúdo novo e nenhum `*.tmp` no diretório.
 - **CA-06** `log(..., run_id=None)` → a linha não tem a chave `run_id`; com `run_id="x"` → `"run_id": "x"`.
 - **CA-07** `configure_logging` chamado 2x no mesmo *logger* → um único *handler*.
-- **CA-08** Guarda anti-duplicação: nenhum `.py` fora de `common/` e `tests/` contém `class _JsonFormatter`, `class _TextFormatter`, `IO_RETRY_BACKOFF_SECONDS =` ou `time.sleep(`.
+- **CA-08** Guarda anti-duplicação: nenhum `.py` fora de `common/` e `tests/` define subclasse de `logging.Formatter` (pela árvore sintática) nem contém `IO_RETRY_BACKOFF_SECONDS =`, `time.sleep(` ou `lambda tmp: write_json(`. Uma cópia de `common/log.py` fora de `common/` é acusada.
 - **CA-09** A suíte existente continua verde sem alterar asserções, só os alvos de *monkeypatch* de `time.sleep`.
+- **CA-10** `write_json_atomic` grava em `dest` exatamente os bytes de `write_json` para o mesmo *payload* e não deixa `*.tmp`.
 
 ## 6. Fora de escopo
 
@@ -69,15 +71,17 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 
 ## 7. Checklist de implementação
 
-- [ ] `common/errors.py`, `common/io.py`, `common/log.py` (CM-R01 a CM-R04)
-- [ ] `tests/unit/test_common.py` (CA-01 a CA-07)
-- [ ] `tests/unit/test_no_duplicated_infra.py` (CA-08, CM-R05)
-- [ ] Migrar `pipeline.py` (só log)
-- [ ] Migrar `evaluate/metrics.py`
-- [ ] Migrar `train/train.py`
-- [ ] Migrar `registry/registry.py`
-- [ ] Migrar `transform/split.py`
-- [ ] Migrar `labels/build.py` (alvo de *monkeypatch* de `time.sleep` → `common.io.time`)
-- [ ] Migrar `ingest/validate.py` (corrige o `io_retry` aninhado; alvo de *monkeypatch* → `common.io.time`)
-- [ ] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
-- [ ] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
+- [x] `common/errors.py`, `common/io.py`, `common/log.py` (CM-R01 a CM-R04)
+- [x] `tests/unit/test_common.py` (CA-01 a CA-07)
+- [x] `tests/unit/test_no_duplicated_infra.py` (CA-08, CM-R05)
+- [x] Migrar `pipeline.py` (só log)
+- [x] Migrar `evaluate/metrics.py`
+- [x] Migrar `train/train.py`
+- [x] Migrar `registry/registry.py`
+- [x] Migrar `transform/split.py`
+- [x] Migrar `labels/build.py` (alvo de *monkeypatch* de `time.sleep` → `common.io.time`)
+- [x] Migrar `ingest/validate.py` (corrige o `io_retry` aninhado; alvo de *monkeypatch* → `common.io.time`)
+- [x] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
+- [x] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
+- [x] `write_json_atomic` no lugar do *lambda* aninhado nos 6 módulos (CA-10, CA-08)
+- [x] Guarda de CM-R05 barra qualquer subclasse de `logging.Formatter` fora de `common/` (CA-08)
