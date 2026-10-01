@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json_atomic
+from common.io import atomic_write, atomic_write_dir, with_io_retry, write_json_atomic
 from common.log import configure_logging, log, now_iso
+from evaluate.metrics import EMBEDDINGS_FT
 
 logger = logging.getLogger("registry.registry")
 
@@ -125,6 +126,11 @@ def register_model(
     if not (eval_path.exists() and train_manifest_path.exists() and candidate_path.exists()):
         raise RegisterGateError("RG_R01_GATE_STAGING_INCOMPLETE", f"incomplete staging at {staging}")
 
+    train_manifest = json.loads(train_manifest_path.read_text(encoding="utf-8"))
+    algorithm = train_manifest["algorithm"]
+    if algorithm == EMBEDDINGS_FT and not (staging / "encoder").exists():
+        raise RegisterGateError("RG_R01_GATE_STAGING_INCOMPLETE", f"missing encoder/ at {staging}")
+
     eval_json = json.loads(eval_path.read_text(encoding="utf-8"))
     if not eval_json.get("gate", {}).get("passed"):
         raise CandidateRejectedError(
@@ -140,7 +146,6 @@ def register_model(
     model_version = _mint_model_version(models_dir)
 
     # F4 — montagem do manifesto
-    train_manifest = json.loads(train_manifest_path.read_text(encoding="utf-8"))
     dataset_json = json.loads((datasets_dir / dataset_id / "dataset.json").read_text(encoding="utf-8"))
 
     manifest = {
@@ -153,11 +158,19 @@ def register_model(
         "feature_spec_version": dataset_json["feature_spec_version"],
         "history_window": 30,
         "history_scope": "conversation",
-        "algorithm": train_manifest["algorithm"],
+        "algorithm": algorithm,
         "metrics": eval_json["metrics"]["candidate"],
         "code_commit": train_manifest["code_commit"],
         "training_fingerprint": fingerprint,
     }
+    if algorithm == EMBEDDINGS_FT:
+        # RG-R19: lido de train_manifest.json.hyperparameters.embeddings.encoder (spec 11 §5).
+        encoder_hp = train_manifest["hyperparameters"]["embeddings"]["encoder"]
+        manifest["encoder"] = {
+            "source": encoder_hp["source"],
+            "revision": encoder_hp["revision"],
+            "max_length": encoder_hp["max_length"],
+        }
     return RegisterResult(model_version, manifest, candidate_path, reused=False)
 
 
@@ -216,6 +229,14 @@ def promote_model(
 
 def _copy_atomic(src: Path, dest: Path, run_id: str) -> None:
     _with_io_retry("copy_model", lambda: atomic_write(dest, lambda tmp: shutil.copyfile(src, tmp)), run_id, "RG_R15_IO_FAILED")
+
+
+def _copy_dir_atomic(src: Path, dest: Path, run_id: str) -> None:
+    """RG-R18: copia `encoder/` de forma atômica — mesmo padrão de `_copy_atomic`,
+    para um diretório inteiro em vez de um arquivo único."""
+    _with_io_retry(
+        "copy_encoder", lambda: atomic_write_dir(dest, lambda tmp: shutil.copytree(src, tmp)), run_id, "RG_R15_IO_FAILED"
+    )
 
 
 def _write_json_atomic(payload: dict[str, Any], dest: Path, run_id: str, error_code: str) -> None:
@@ -291,6 +312,8 @@ def _run_register(args: argparse.Namespace) -> int:
     model_dir = Path(args.models_dir) / result.model_version
 
     try:
+        if result.manifest["algorithm"] == EMBEDDINGS_FT:
+            _copy_dir_atomic(result.candidate_path.parent / "encoder", model_dir / "encoder", run_id)
         _copy_atomic(result.candidate_path, model_dir / "model.joblib", run_id)
         _write_json_atomic(result.manifest, model_dir / "manifest.json", run_id, "RG_R15_IO_FAILED")
     except RegistryIOError as exc:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +44,19 @@ def atomic_write(dest: Path, write_tmp: Callable[[Path], Any]) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     write_tmp(tmp)
+    os.replace(tmp, dest)
+
+
+def atomic_write_dir(dest: Path, write_tmp_dir: Callable[[Path], Any]) -> None:
+    """Writes through `<dest>.tmp` + os.replace, so `dest` is never left partial.
+    Pre-condition: `dest` does not exist yet. Removes a `<dest>.tmp` left over from
+    an interrupted run, then calls `write_tmp_dir(<dest>.tmp)`, which must create
+    the directory itself (mirrors `atomic_write`, but for a directory tree)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    write_tmp_dir(tmp)
     os.replace(tmp, dest)
 
 

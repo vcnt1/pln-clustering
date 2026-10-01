@@ -76,7 +76,7 @@ python -m train.train <dataset_id> [--config configs/pipeline.yaml] [--staging-d
 python -m evaluate.metrics <dataset_id> [--config configs/pipeline.yaml] [--staging-dir models/_staging]
 ```
 
-Runtime: Python 3.12. Nenhuma dependência nova além de `scikit-learn`, `joblib`, `scipy` (Spearman), já em `requirements.txt`. Dependências de `torch`/`sentence-transformers` (abordagem C) ficam **fora deste documento** (ADR-0008: "implementada depois", requirements separado).
+Runtime: Python 3.12. Nenhuma dependência nova além de `scikit-learn`, `joblib`, `scipy` (Spearman), já em `requirements.txt`. Dependências de `torch`/`transformers` (abordagem C) ficam **fora deste documento** — spec 11 (ADR-0009), `requirements-embeddings.txt` separado.
 
 Invocação pelo orquestrador (spec 09): `make train DATASET=<dataset_id>`, `make evaluate DATASET=<dataset_id>`, e `python -m pipeline train|evaluate --config configs/pipeline.yaml`.
 
@@ -152,10 +152,12 @@ fingerprint = sha256(canonical_json({
     "dataset_id": ...,
     "dataset_sha256": {"train": ..., "validation": ..., "test": ...},   # de dataset.json
     "algorithm": "tfidf-ridge",
-    "hyperparameters": {...},   # tudo que está em configs/pipeline.yaml, seção train
+    "hyperparameters": hyperparameters_for(algorithm, train_config),
     "feature_spec_version": "fs-1",
 }))[:16]
 ```
+
+**`hyperparameters_for(algorithm, train_config)` isola, por algoritmo, só os campos de `configs/pipeline.yaml: train` que esse algoritmo de fato lê** — não o bloco `train:` inteiro. Sem esse isolamento, dois problemas apareceriam assim que uma segunda abordagem ganhasse seu próprio bloco de configuração (abordagem C, spec 11, bloco `train.embeddings`): acrescentar `train.embeddings` ao YAML mudaria o *fingerprint* de A (todo staging de A, já pago, ficaria obsoleto sem nenhuma mudança em A) e o *fingerprint* de C incluiria hiperparâmetros de TF-IDF/Ridge que não têm nenhum efeito sobre C. Hoje, com um só algoritmo implementado, `hyperparameters_for("tfidf-ridge", train_config)` devolve `train_config` menos a chave `algorithm` — o mesmo valor de antes, então nenhum *fingerprint* existente muda por causa desta emenda.
 
 O diretório de staging é `models/_staging/<dataset_id>/<algorithm>/<fingerprint>/`. Como o caminho **é** a identidade, e a identidade **é** uma função do conteúdo, o problema que `dataset_id` teve (mesmo nome, conteúdos diferentes, exigindo um mecanismo de conflito com *exit* 4) **não existe aqui**: dois treinos com entradas diferentes caem em diretórios diferentes automaticamente. Não há como colidir.
 
@@ -176,7 +178,7 @@ O diretório de staging é `models/_staging/<dataset_id>/<algorithm>/<fingerprin
 
 ```yaml
 train:
-  algorithm: tfidf-ridge     # único valor implementado nesta spec; "embeddings-ridge" reservado (ADR-0008, abordagem C)
+  algorithm: tfidf-ridge     # abordagem A, única implementada nesta spec; "embeddings-ft" é a abordagem C (spec 11, ADR-0009) — o valor "embeddings-ridge" nunca chegou a ser implementado
   seed: 42
   ridge:
     alpha: 1.0
@@ -235,7 +237,7 @@ Herda a volumetria da spec 05: até ~28.000 linhas de `train` (70% do teto de 40
 | `DummyRegressor.fit` | Instantâneo |
 | `evaluate.metrics` (predição + métricas sobre `test`) | Sub-segundo |
 
-Orçamento de desempenho: `train.train` em menos de 1 minuto no corpus esperado, poucos minutos no teto de 10×. `evaluate.metrics`, segundos em qualquer caso. Nenhum dos dois se aproxima de precisar de processamento distribuído ou GPU (reservado para a abordagem C, ADR-0008).
+Orçamento de desempenho: `train.train` em menos de 1 minuto no corpus esperado, poucos minutos no teto de 10×. `evaluate.metrics`, segundos em qualquer caso. Nenhum dos dois se aproxima de precisar de processamento distribuído ou GPU — a abordagem C (spec 11) tem orçamento próprio, em CPU ou GPU conforme disponível (ADR-0009).
 
 **Frequência.** Sob demanda, depois de `split` bem-sucedido. Diferente das specs 02–05, aqui a cadência **não é estritamente sequencial em uma direção só**: o operador pode rodar `train.train` várias vezes com hiperparâmetros diferentes sobre o mesmo `dataset_id` (cada um em seu próprio staging, §3.3) antes de rodar `evaluate.metrics` sobre o que parecer mais promissor.
 
@@ -423,7 +425,7 @@ Nenhuma referência a `duckdb` ou `.duckdb` em `train/` ou `evaluate/` — mesma
 | D1 | **Escopo:** treino e avaliação num só documento | Replica a numeração de componente já usada no projeto (`06-train-evaluate`); o *quality gate* não é interpretável isolado do fit que o precede | Documento mais longo que as specs 02–05; mitigado por seções claramente separadas por script |
 | D2 | **`models/_staging/`** — diretório novo, não previsto na `data-model.md` | `train.train` e `evaluate.metrics` são subcomandos independentes (spec 09); o candidato precisa de um lugar para existir entre o fit e o registro | A `data-model.md §4` deveria ganhar uma nota sobre este diretório — pendência a levar para fora do `mood-ml` (mesmo padrão da spec 03 §10 com `persona` em `datasets/*`) |
 | D3 | **Identidade do treino é conteúdo-endereçada** (*fingerprint*), não escolhida pelo operador | Elimina a classe inteira de conflito que `corpus_id`/`dataset_id` precisaram resolver com *exit* 4 — aqui, entradas diferentes não podem colidir por construção | Um `fingerprint` não é memorável; o operador navega por `dataset_id` + config, não por um nome à mão |
-| D4 | **Sem busca de hiperparâmetros** | Volume do MVP e prazo de TCC não justificam a complexidade; `validation` cumpre papel diagnóstico, não decisório | Ajuste de hiperparâmetro é manual (editar YAML, rerodar); registrado como evolução possível, não implementado |
+| D4 | **Sem busca de hiperparâmetros** | Volume do MVP e prazo de TCC não justificam a complexidade; `validation` cumpre papel diagnóstico, não decisório | Ajuste de hiperparâmetro é manual (editar YAML, rerodar); registrado como evolução possível, não implementado. **Exceção na abordagem C** (spec 11): `validation` decide o *early stopping* do fine-tuning — não é busca de hiperparâmetro, é parte do próprio fit, mas é uma decisão automática baseada em `validation` que D4 não previa para A |
 | D5 | **`clip_score` mora em `evaluate/metrics.py`**, importada por `infer/predict.py` | Evita uma classe customizada dentro do `Pipeline` serializado (risco de quebra entre versões do scikit-learn); função pura de uma linha é mais simples e igualmente segura para P4 | `evaluate/` passa a ter uma dependência de import por `infer/` (spec 08) — documentado para não surpreender quando a spec 08 for escrita |
 
 ## 9. Critérios de aceite
@@ -445,7 +447,7 @@ Nenhuma referência a `duckdb` ou `.duckdb` em `train/` ou `evaluate/` — mesma
 ## 10. Fora de escopo
 
 - **Registro e promoção do modelo** (`registry/registry.py`, `model_version`, `active.json`) — spec 07. Este documento produz o insumo (`eval.json` aprovado), não o consome.
-- **Abordagem C (embeddings congelados)** — ADR-0008, "implementada depois". `algorithm: "embeddings-ridge"` é um valor reservado no config, não implementado.
+- **Abordagem C (`algorithm: "embeddings-ft"`)** — detalhada na [spec 11](11-embeddings-finetuning.md) (ADR-0009). Este documento define o fluxo comum (F1-F6, fingerprint, *quality gate*, `clip_score`) que C reaproveita; a vetorização e o fit específicos de C ficam fora daqui. `algorithm: "embeddings-ridge"` (encoder congelado) nunca chegou a ser implementado — a ADR-0009 substituiu essa variante por `embeddings-ft` antes de qualquer código existir.
 - **Busca automática de hiperparâmetros** (`GridSearchCV` ou equivalente) — decisão explícita (D4). Pode ser revisitada se o projeto crescer além do escopo de TCC.
 - **T6 (score → `mood_label`) e métricas de classificação** — fora de escopo por ADR-0001 (`mood_label = null`, sem T6). Métricas são só de regressão (MAE, RMSE, Spearman).
 - **Agendamento de retreino e alerta de regressão de qualidade** — mencionado em §4.4 como ponto a revisitar, não implementado no MVP.

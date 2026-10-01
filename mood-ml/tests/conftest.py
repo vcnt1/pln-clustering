@@ -2,6 +2,7 @@ import json
 import random
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -241,8 +242,11 @@ def build_synthetic_dataset(
 def train_and_stage(directory: Path, dataset_id: str, config: dict) -> Path:
     """Calls the real build_candidate() and writes the staging artifacts —
     same pattern as approve_corpus/approve_labels: exercise the real
-    function, not a hand-forged fixture."""
-    from train.train import _dump_joblib_atomic, build_candidate
+    function, not a hand-forged fixture. Mirrors train.train.main()'s write
+    order (encoder/ before candidate.joblib, manifest last) so abordagem C
+    staging is idempotency-complete the same way the real CLI leaves it."""
+    from evaluate.metrics import EMBEDDINGS_FT
+    from train.train import _dump_joblib_atomic, _save_encoder_atomic, build_candidate
     from train.train import _write_json_atomic as _write_train_manifest
 
     result = build_candidate(
@@ -250,6 +254,8 @@ def train_and_stage(directory: Path, dataset_id: str, config: dict) -> Path:
     )
     if not result.reused:
         _dump_joblib_atomic(result.baseline, result.staging_dir / "baseline.joblib", "test")
+        if config.get("train", {}).get("algorithm") == EMBEDDINGS_FT:
+            _save_encoder_atomic(result.candidate, result.staging_dir / "encoder", "test")
         _dump_joblib_atomic(result.candidate, result.staging_dir / "candidate.joblib", "test")
         manifest = {**result.train_manifest, "trained_at": "2026-01-01T00:00:00.000Z", "duration_ms": 1}
         _write_train_manifest(manifest, result.staging_dir / "train_manifest.json", "test")
@@ -267,6 +273,41 @@ def evaluate_staging(directory: Path, dataset_id: str, config: dict) -> dict:
     eval_json = {**result.eval_json, "evaluated_at": "2026-01-01T00:00:00.000Z", "duration_ms": 1}
     _write_eval_json(eval_json, result.staging_dir / "eval.json", "test")
     return eval_json
+
+
+def embeddings_ft_config(train_config: dict, **block_overrides: Any) -> dict:
+    """train_config com algorithm=embeddings-ft e um bloco `embeddings` completo
+    (espelha configs/pipeline.yaml §4); overrides substituem blocos inteiros.
+    Compartilhado entre os testes do gate F1b (tests/unit/test_train.py, sem
+    torch) e os testes de integração do ramo C (tests/unit/test_train_embeddings_ft.py,
+    marker `embeddings`)."""
+    embeddings = {
+        "encoder": {
+            "source": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            "revision": "deadbeef",
+            "max_length": 128,
+            "device": "auto",
+            "num_threads": None,
+        },
+        "context": {"weight": 0.5},
+        "probe": {"alpha": 1.0, "solver": "lsqr"},
+        "finetune": {
+            "epochs_max": 5,
+            "patience": 2,
+            "batch_size": 16,
+            "lr_encoder": 2.0e-5,
+            "lr_head": 1.0e-3,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.1,
+            "dropout": 0.1,
+            "freeze_word_embeddings": True,
+        },
+    }
+    embeddings.update(block_overrides)
+    return {
+        **train_config,
+        "train": {**train_config["train"], "algorithm": "embeddings-ft", "embeddings": embeddings},
+    }
 
 
 @pytest.fixture
@@ -295,7 +336,9 @@ def register_active_model(directory: Path, dataset_id: str, config: dict, signal
     registry.register_model (grava model.joblib/manifest.json de verdade) ->
     registry.promote_model (grava active.json). Devolve o model_version
     promovido."""
+    from evaluate.metrics import EMBEDDINGS_FT
     from registry.registry import _copy_atomic as _copy_model_joblib
+    from registry.registry import _copy_dir_atomic as _copy_encoder_dir
     from registry.registry import _write_json_atomic as _write_registry_json
     from registry.registry import register_model
 
@@ -312,9 +355,62 @@ def register_active_model(directory: Path, dataset_id: str, config: dict, signal
     )
     if not result.reused:
         model_dir = directory / "models" / result.model_version
+        if result.manifest["algorithm"] == EMBEDDINGS_FT:
+            _copy_encoder_dir(result.candidate_path.parent / "encoder", model_dir / "encoder", "test")
         _copy_model_joblib(result.candidate_path, model_dir / "model.joblib", "test")
         _write_registry_json(result.manifest, model_dir / "manifest.json", "test", "RG_R15_IO_FAILED")
 
     active_json = {"model_version": result.model_version, "promoted_at": "2026-01-01T00:00:00.000Z"}
     _write_registry_json(active_json, directory / "models" / "active.json", "test", "PM_R09_IO_FAILED")
     return result.model_version
+
+
+# ---------------------------------------------------------------------------
+# Abordagem C (spec 11) — BERT minúsculo de config aleatória, sem download.
+# Importa torch/transformers só dentro da função (lazy): conftest.py é
+# carregado por toda a suíte, inclusive a de A, que precisa continuar
+# funcionando sem essas dependências instaladas (CA-06).
+# ---------------------------------------------------------------------------
+
+
+def build_tiny_encoder(tmp_path: Path, hidden_size: int = 32) -> tuple[Any, Any]:
+    """BertConfig com 2 camadas, d = hidden_size, tokenizer de vocabulário
+    minúsculo escrito em tmp_path — nenhuma rede envolvida (spec 11 §9,
+    "Estratégia de teste"). O vocabulário não tem palavras reais: os testes
+    exercitam pooling/forma, não qualidade semântica."""
+    from transformers import BertConfig, BertModel, BertTokenizer
+
+    vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"] + [f"tok{i}" for i in range(95)]
+    vocab_path = tmp_path / "vocab.txt"
+    vocab_path.write_text("\n".join(vocab), encoding="utf-8")
+    tokenizer = BertTokenizer(str(vocab_path))
+
+    config = BertConfig(
+        vocab_size=len(vocab),
+        hidden_size=hidden_size,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=hidden_size * 2,
+        max_position_embeddings=128,
+    )
+    encoder = BertModel(config)
+    encoder.eval()
+    return encoder, tokenizer
+
+
+@pytest.fixture
+def mock_base_encoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Substitui o download real do encoder por um BERT minúsculo
+    determinístico (`build_tiny_encoder`). `train.train._fit_embeddings_ft`
+    importa `load_base_encoder` de `transform.embeddings` dentro da função
+    (lazy, FT-R02) — o patch precisa alvejar o módulo de origem, não um nome
+    reexportado em outro lugar."""
+    import transform.embeddings as embeddings_module
+
+    source_dir = tmp_path / "tiny-encoder-source"
+    source_dir.mkdir()
+
+    def _load_base_encoder(_settings: Any) -> tuple[Any, Any]:
+        return build_tiny_encoder(source_dir)
+
+    monkeypatch.setattr(embeddings_module, "load_base_encoder", _load_base_encoder)

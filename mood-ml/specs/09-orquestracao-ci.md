@@ -2,7 +2,7 @@
 
 **Status:** Aceita · **Versão da spec:** `pl-1` · **Data:** 2026-09-22
 **Implementa:** `CLAUDE.md §6` ([9] orquestração + CI) — `python -m pipeline <etapa>`, alvos de `Makefile`, workflow de CI.
-**Depende de:** [02-ingest-validate.md](02-ingest-validate.md), [03-labels.md](03-labels.md), [04-transform.md](04-transform.md), [05-split.md](05-split.md), [06-train-evaluate.md](06-train-evaluate.md), [07-registry.md](07-registry.md) — chama a CLI pública de cada um; [constitution.md](../../decisions/constitution.md) P1–P5 por composição (nenhuma regra nova, herdadas de cada camada que esta orquestra)
+**Depende de:** [02-ingest-validate.md](02-ingest-validate.md), [03-labels.md](03-labels.md), [04-transform.md](04-transform.md), [05-split.md](05-split.md), [06-train-evaluate.md](06-train-evaluate.md), [07-registry.md](07-registry.md) — chama a CLI pública de cada um; [11-embeddings-finetuning.md](11-embeddings-finetuning.md) (job de CI separado, PL-R16); [constitution.md](../../decisions/constitution.md) P1–P5 por composição (nenhuma regra nova, herdadas de cada camada que esta orquestra)
 **Consumido por:** operador humano (linha de comando/`make`), GitHub Actions (CI)
 **Implementado em:** [pipeline.py](../pipeline.py), [Makefile](../Makefile), `.github/workflows/ci.yml`
 
@@ -161,6 +161,22 @@ jobs:
 
 Só validação — nenhum artefato do `make all` de teste é publicado ou persistido além do log do próprio job (decisão do usuário, §8 D3): é um MVP acadêmico, sem infraestrutura de deploy ainda.
 
+**Job separado para a abordagem C (`embeddings-ft`, spec 11).** O job `test` acima roda só com `requirements.txt` — sem `torch`/`transformers` — e por isso nunca exercita `embeddings-ft` (os testes dessa abordagem usam `pytest.ini: markers = embeddings` e são pulados via `importorskip` quando o pacote não está instalado, spec 11 §7, "Estratégia de teste"). Um segundo job, `test-embeddings`, roda em paralelo ao `test`:
+
+```yaml
+  test-embeddings:
+    steps:
+      - checkout
+      - setup-python (3.12)
+      - pip install -r mood-ml/requirements.txt
+      - pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - pip install -r mood-ml/requirements-embeddings.txt
+      - ruff check .
+      - pytest -q -m "embeddings and not slow"
+```
+
+Instala o torch CPU antes de `requirements-embeddings.txt` para não puxar a build CUDA do índice padrão do PyPI (que é grande e desnecessária em CI). O marcador `slow` (encoder real, baixado da rede) fica fora dos dois jobs — só roda manualmente, documentado na spec 11. O job `test` original **não muda**: continua sem `torch`, prova que a suíte de A (e o restante do projeto) funciona sem a dependência pesada instalada (FT-R02, CA-06 da spec 11).
+
 ## 4. Tratamento de erros e resiliência
 
 ### 4.1 Propagação de erro em `all`
@@ -261,6 +277,9 @@ Nenhuma referência a `duckdb`/`.duckdb` em `pipeline.py` — mesma verificaçã
 - **PL-R13** QUANDO qualquer um dos três passos do CI falhar, o workflow DEVE terminar com falha (*exit* não-zero do job).
 - **PL-R14** O CI DEVE NÃO publicar nem persistir nenhum artefato do `make all` de teste além do log do próprio job.
 
+**CI — abordagem C**
+- **PL-R16** O workflow de CI DEVE rodar um job separado (`test-embeddings`) que instala `requirements-embeddings.txt` (spec 11) e roda `pytest -q -m "embeddings and not slow"`; o job `test` original DEVE permanecer sem essa dependência instalada.
+
 **Segurança**
 - **PL-R15** `pipeline.py` DEVE NÃO importar `duckdb` nem referenciar caminho `.duckdb` (P1).
 
@@ -308,4 +327,5 @@ Não introduz nenhum código de erro novo — reaproveita o catálogo de cada ca
 - [ ] Log de orquestração (`pipeline_started`/`step_started`/`step_finished`/`step_failed`/`pipeline_finished`) (§5.2)
 - [ ] `Makefile` — um alvo por subcomando, repassando variáveis (PL-R10)
 - [ ] `.github/workflows/ci.yml` — `ruff check .` + `pytest -q` + `make all` sobre a fixture, em `push`/`pull_request` para `main` (PL-R11 a PL-R14)
+- [ ] `.github/workflows/ci.yml` — job `test-embeddings` separado, com `requirements-embeddings.txt` (PL-R16, spec 11)
 - [ ] Testes `tests/unit/` (geração de `dataset_id`, recálculo de *fingerprint*, propagação de *exit code*) e `tests/contract/` (subcomandos individuais equivalentes ao módulo direto, `all` ponta a ponta com a fixture) cobrindo CA-01 a CA-09

@@ -2,7 +2,7 @@
 
 **Status:** Aceita · **Versão da spec:** `rg-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §4.4](../../data-structure/data-model.md) (`models/<model_version>/manifest.json`) e fecha a decisão "em aberto" de `models/active.json` (`data-model.md §9.2`).
-**Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`mood_labels = null`, sem T6), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (`history_window = 30`, `history_scope = "conversation"`), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (`algorithm`); [constitution.md](../../decisions/constitution.md) P3, P4, P5; [06-train-evaluate.md](06-train-evaluate.md) (staging e `eval.json` de origem)
+**Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`mood_labels = null`, sem T6), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (`history_window = 30`, `history_scope = "conversation"`), [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md) (`algorithm`); [constitution.md](../../decisions/constitution.md) P3, P4, P5; [06-train-evaluate.md](06-train-evaluate.md) (staging e `eval.json` de origem), [11-embeddings-finetuning.md](11-embeddings-finetuning.md) (cópia de `encoder/`, campo `encoder` no manifesto — RG-R18, RG-R19)
 **Consumido por:** `infer/predict.py` (spec 08) — lê `active.json` na subida do serviço, depois `models/<model_version>/manifest.json` e `model.joblib`
 **Implementado em:** [registry/registry.py](../registry/registry.py)
 
@@ -27,6 +27,7 @@ models/_staging/<dataset_id>/<algorithm>/<fingerprint>/
        │
        ▼
 registry.register  ──►  models/<model_version>/
+                             encoder/              (só embeddings-ft — cópia atômica, spec 11 FT-R16)
                              model.joblib        (cópia de candidate.joblib)
                              manifest.json        (data-model §4.4 + training_fingerprint)
        │
@@ -48,7 +49,7 @@ infer/predict.py (spec 08) — lê active.json na subida do serviço
 | F3a | (achou) | Loga `already_registered` com o `model_version` encontrado; encerra em 0, sem escrever nada |
 | F3b | (não achou) | Minta um `model_version` novo (§3.3) |
 | F4 | Montagem do manifesto | Lê `eval.json`, `train_manifest.json` e `dataset.json` (spec 05) para preencher os campos de `data-model.md §4.4` |
-| F5 | Emissão | Copia `candidate.joblib` → `model.joblib`; grava `manifest.json`; loga o resumo; encerra |
+| F5 | Emissão | QUANDO `algorithm = "embeddings-ft"`, copia `encoder/` de forma atômica (spec 11, FT-R16); copia `candidate.joblib` → `model.joblib`; grava `manifest.json` por último; loga o resumo; encerra |
 
 ### 2.3 Passo a passo lógico — `registry.promote`
 
@@ -107,6 +108,8 @@ Invocação pelo orquestrador (spec 09): `make register DATASET=<dataset_id> FIN
   "training_fingerprint": "b7a1...9f0c"
 }
 ```
+
+QUANDO `algorithm = "embeddings-ft"` (spec 11), `manifest.json` ganha um campo adicional: `"encoder": {"source": "...", "revision": "...", "max_length": 128}`, lido de `train_manifest.json.hyperparameters.embeddings.encoder`. Ausente nos demais algoritmos.
 
 `training_fingerprint` (o mesmo *fingerprint* da spec 06, §3.3 daquele documento) **não está** na `data-model.md §4.4` original — é o que torna a busca de idempotência da §3.3 abaixo possível sem um índice separado. Fica registrado como extensão pendente de levar para a `data-model.md`, no mesmo padrão já usado pela spec 03 (`persona` em `datasets/*`) e pela spec 06 (`models/_staging/`).
 
@@ -170,7 +173,7 @@ Orçamento de desempenho: a varredura de idempotência (§3.3) sobre dezenas de 
 
 > Implementação: `common.io.with_io_retry` e `common.io.atomic_write` ([spec 10](10-common.md)).
 
-**Gravação atômica, em ordem — `register`.** `model.joblib` primeiro (cópia via arquivo temporário + `os.replace()`), `manifest.json` por último. `manifest.json` é o marcador de sucesso: sua presença implica o modelo copiado corretamente. Se a cópia falhar e for retentada, nada em `models/<model_version>/` fica pela metade visível a quem procura por `manifest.json`.
+**Gravação atômica, em ordem — `register`.** QUANDO `algorithm = "embeddings-ft"`, `encoder/` primeiro (cópia de diretório via `common.io.atomic_write_dir`, spec 10 CM-R06); depois `model.joblib` (cópia via arquivo temporário + `os.replace()`); `manifest.json` por último, nos dois casos. `manifest.json` é o marcador de sucesso: sua presença implica o modelo — e o encoder, quando aplicável — copiados corretamente. Se qualquer cópia falhar e for retentada, nada em `models/<model_version>/` fica pela metade visível a quem procura por `manifest.json`.
 
 **Gravação atômica — `promote`.** Só `active.json`, via `.tmp` + `os.replace()`. Não há ordem a definir porque só há um arquivo.
 
@@ -301,6 +304,10 @@ Nenhuma referência a `duckdb`/`.duckdb` em `registry/` — mesma verificação 
 - **PM-R07** `active.json` DEVE conter no mínimo `model_version` e `promoted_at`.
 - **PM-R08** `active.json` DEVE ser sobrescrito atomicamente a cada promoção e DEVE NÃO manter histórico de promoções anteriores.
 
+**Abordagem C (`embeddings-ft`, spec 11)**
+- **RG-R18** QUANDO `algorithm = "embeddings-ft"`, o script DEVE copiar o diretório `encoder/` do staging para `models/<model_version>/encoder/` de forma atômica, antes de `model.joblib` (FT-R16).
+- **RG-R19** QUANDO `algorithm = "embeddings-ft"`, `manifest.json` DEVE conter o campo `encoder: {source, revision, max_length}`, lido de `train_manifest.json`; ausente nos demais algoritmos.
+
 **Segurança**
 - **RG-R16 / PM-R09** Nenhum dos dois scripts DEVE importar `duckdb` nem referenciar caminho `.duckdb` (P1).
 - **RG-R17** `manifest.json` e `active.json` DEVEM conter apenas IDs, métricas e timestamps — nenhum `text`.
@@ -349,7 +356,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `registry/` — mesma verificação 
 - **Controle de concorrência entre chamadas simultâneas de `register`** — premissa assumida de operador único (§3.3); revisitar se o projeto ganhar múltiplos operadores ou automação concorrente.
 - **Log/histórico de promoções** — decisão explícita do usuário (D2); pode ser adicionado depois sem quebrar o esquema atual de `active.json` (é aditivo).
 - **Reversão automática de promoção** ("voltar para a versão anterior") — não implementada; sem histórico (D2), reverter exige o operador saber de cor qual era o `model_version` anterior.
-- **Abordagem C (embeddings)** — o `algorithm` já é um campo do manifesto (ADR-0008); nenhuma lógica específica de C é tratada aqui.
+- **Lógica de treino/avaliação da abordagem C** (fine-tuning, *pooling*, métricas) — spec 11. Esta spec só copia `encoder/` e estende o manifesto com `encoder` (RG-R18/RG-R19 abaixo); não decide nada sobre como C é treinada ou avaliada.
 - **Orquestração, CI e alvos de Makefile.** Spec 09.
 
 ## 11. Checklist de implementação
@@ -359,6 +366,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `registry/` — mesma verificação 
 - [ ] F3b — numeração sequencial de `model_version` por mês (RG-R05, RG-R06)
 - [ ] F4 — montagem do `manifest.json` a partir de `eval.json`, `train_manifest.json`, `dataset.json` (RG-R07 a RG-R12)
 - [ ] F5 — cópia atômica de `model.joblib` e escrita de `manifest.json`, nesta ordem (RG-R13 a RG-R15)
+- [ ] F5 — QUANDO `embeddings-ft`, cópia atômica de `encoder/` antes de `model.joblib`, e campo `encoder` no manifesto (RG-R18, RG-R19, spec 11 CA-12)
 - [ ] `registry.promote` — CLI, F1 portão sobre `manifest.json` do alvo (PM-R01)
 - [ ] F2 — checagem de já-ativo (PM-R06)
 - [ ] F3 — comparação de métrica com a versão ativa e bloqueio sem `--force` (PM-R02 a PM-R05)

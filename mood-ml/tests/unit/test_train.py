@@ -1,12 +1,15 @@
 import re
+import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
+import train.train as train_module
 from evaluate.metrics import compute_training_fingerprint
-from tests.conftest import build_synthetic_dataset
+from tests.conftest import build_synthetic_dataset, embeddings_ft_config
 from train.train import (
     TrainConfigError,
     TrainGateError,
@@ -107,12 +110,89 @@ def test_different_hyperparameters_produce_different_staging_dir(corpus_root: Pa
     assert result1.staging_dir != result2.staging_dir
 
 
-def test_unsupported_algorithm_raises_config_error(corpus_root: Path, train_config: dict) -> None:
+@pytest.mark.parametrize(
+    "bad_algorithm",
+    [
+        "nonexistent-algorithm",
+        "embeddings-ridge",  # soa plausível, mas nunca foi implementado (ADR-0009) — não confundir com embeddings-ft
+    ],
+)
+def test_unsupported_algorithm_raises_config_error(corpus_root: Path, train_config: dict, bad_algorithm: str) -> None:
     build_synthetic_dataset(corpus_root, "ds-c")
-    bad_config = {**train_config, "train": {**train_config["train"], "algorithm": "embeddings-ridge"}}
+    bad_config = {**train_config, "train": {**train_config["train"], "algorithm": bad_algorithm}}
     with pytest.raises(TrainConfigError) as exc:
         build_candidate("ds-c", bad_config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging")
     assert exc.value.code == "TN_R17_UNSUPPORTED_ALGORITHM"
+
+
+# ---------------------------------------------------------------------------
+# F1b — abordagem C (embeddings-ft): gate de config antes de ler .parquet
+# ---------------------------------------------------------------------------
+
+
+def test_embeddings_ft_aborts_when_revision_missing(corpus_root: Path, train_config: dict) -> None:
+    build_synthetic_dataset(corpus_root, "ds-ft-revision")
+    config = embeddings_ft_config(train_config)
+    config["train"]["embeddings"]["encoder"]["revision"] = ""
+
+    with pytest.raises(TrainConfigError) as exc:
+        build_candidate(
+            "ds-ft-revision", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
+        )
+    assert exc.value.code == "FT_R04_REVISION_MISSING"
+
+
+def test_embeddings_ft_aborts_without_torch(
+    corpus_root: Path, train_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CA-06: sem torch instalado, embeddings-ft sai por FT_R02 — depois de passar
+    pela checagem de revision (FT-R04 vem primeiro). `torch` ausente é simulado via
+    sys.modules em vez de depender do ambiente real: a suíte de A e a suíte de
+    embeddings rodam em dois jobs de CI diferentes (spec 09), mas podem coexistir
+    no mesmo venv local de desenvolvimento."""
+    build_synthetic_dataset(corpus_root, "ds-ft-deps")
+    config = embeddings_ft_config(train_config)
+    monkeypatch.setitem(sys.modules, "torch", None)
+
+    with pytest.raises(TrainConfigError) as exc:
+        build_candidate(
+            "ds-ft-deps", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
+        )
+    assert exc.value.code == "FT_R02_DEPS_MISSING"
+
+
+def test_embeddings_ft_aborts_on_incomplete_config(
+    corpus_root: Path, train_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_synthetic_dataset(corpus_root, "ds-ft-config")
+    config = embeddings_ft_config(train_config)
+    del config["train"]["embeddings"]["finetune"]["patience"]
+    monkeypatch.setattr(train_module, "_check_embeddings_deps", lambda: None)
+
+    with pytest.raises(TrainConfigError) as exc:
+        build_candidate(
+            "ds-ft-config", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
+        )
+    assert exc.value.code == "FT_R01_CONFIG_INVALID"
+
+
+def test_embeddings_ft_gate_does_not_read_parquet(
+    corpus_root: Path, train_config: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CA-11: o gate F1b aborta antes de qualquer pd.read_parquet."""
+    build_synthetic_dataset(corpus_root, "ds-ft-noread")
+    config = embeddings_ft_config(train_config)
+    config["train"]["embeddings"]["encoder"]["revision"] = ""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("parquet should not be read before the F1b gate")
+
+    monkeypatch.setattr(pd, "read_parquet", _boom)
+
+    with pytest.raises(TrainConfigError):
+        build_candidate(
+            "ds-ft-noread", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
+        )
 
 
 def test_gate_blocked_when_dataset_json_is_corrupted(corpus_root: Path, train_config: dict) -> None:
