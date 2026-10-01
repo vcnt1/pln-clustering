@@ -1,0 +1,27 @@
+services:
+  mood-ml:
+    build: ./mood-ml
+    ports:
+      - "8001:8001"
+
+  mood-api:
+    build: ./mood-api
+    ports:
+      - "8000:8000"
+    environment:
+      MOOD_ML_BASE_URL: http://mood-ml:8001
+      MOOD_API_ALLOWED_ORIGINS: http://localhost:5173
+    volumes:
+      - ./mood-api/data:/app/data
+    depends_on:
+      - mood-ml
+
+  chat-app:
+    build:
+      context: ./chat-app
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - mood-api

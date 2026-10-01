@@ -168,16 +168,35 @@ viés do modelo entre diferentes perfis linguísticos de clientes.
 
 ## Ambiente
 
-Python 3.12 é a versão exigida para `mood-api` e `mood-ml`, cada um com seu
-próprio `.venv`. Use os scripts na raiz do repositório para reproduzir o
-ambiente:
+Os três componentes rodam via Docker Compose, cada um com seu próprio
+`Dockerfile` (`mood-api/`, `mood-ml/`, `chat-app/`).
+
+### Como rodar
+
+Pré-requisito: Docker e Docker Compose instalados.
 
 ```bash
-./setup-mood-api.sh   # cria mood-api/.venv (Python 3.12) e instala requirements.txt
-./setup-mood-ml.sh    # cria mood-ml/.venv (Python 3.12) e instala requirements.txt
-./setup-chat-app.sh   # roda npm install em chat-app
-./setup.sh            # roda os três acima em sequência
+docker compose up --build
 ```
 
-Os scripts falham com uma mensagem clara se `python3.12` não estiver
-disponível, ou se um `.venv` existente tiver sido criado com outra versão.
+Isso sobe:
+
+- `mood-api` em `http://localhost:8000`
+- `mood-ml` em `http://localhost:8001`
+- `chat-app` em `http://localhost:5173`
+
+O arquivo `mood-api/data/mood.duckdb` é montado como volume (`./mood-api/data:/app/data`),
+então os dados persistem entre reinícios dos containers.
+
+Para rodar um serviço isolado (ex.: só a API, útil durante desenvolvimento do
+modelo de ML):
+
+```bash
+docker compose up --build mood-api mood-ml
+```
+
+Para parar:
+
+```bash
+docker compose down
+```
