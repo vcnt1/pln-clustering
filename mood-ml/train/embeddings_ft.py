@@ -26,6 +26,17 @@ from transform.embeddings import build_features, encode_context, encode_texts
 _NOOP_EMIT: Callable[[str, dict[str, Any]], None] = lambda event, fields: None
 
 
+class NonFiniteError(Exception):
+    """Sinalização interna para `train.train._fit_embeddings_ft`: carrega o
+    código de erro (`FT_R13_NON_FINITE` para `train`, `FT_R23_NON_FINITE_VALIDATION`
+    para `validation`, spec 11 §7) já estruturado, em vez de embutido na mensagem."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(detail)
+
+
 @dataclass
 class FineTuneSettings:
     """Espelha `train.embeddings.finetune` em configs/pipeline.yaml (spec 11 §4)."""
@@ -106,7 +117,7 @@ def run_probe(
 
     validation_preds = ridge.predict(validation_features)
     if not np.all(np.isfinite(validation_preds)):
-        raise FloatingPointError("FT_R13_NON_FINITE: non-finite prediction during linear probing")
+        raise NonFiniteError("FT_R23_NON_FINITE_VALIDATION", "non-finite prediction during linear probing")
     clipped = np.array([clip_score(v) for v in validation_preds])
     probe_validation_mae = float(np.mean(np.abs(clipped - validation_df["label_score"].to_numpy())))
 
@@ -179,7 +190,7 @@ def finetune(
             encoder.train(was_training)
             head.train(was_training)
         if not np.all(np.isfinite(preds)):
-            raise FloatingPointError("FT_R13_NON_FINITE: non-finite prediction on validation")
+            raise NonFiniteError("FT_R23_NON_FINITE_VALIDATION", "non-finite prediction on validation")
         clipped = np.array([clip_score(v) for v in preds])
         return float(np.mean(np.abs(clipped - validation_labels)))
 
@@ -207,7 +218,7 @@ def finetune(
             targets = torch.as_tensor(train_labels[batch_indices], dtype=torch.float32, device=device)
             loss = nn.functional.mse_loss(preds, targets)
             if not torch.isfinite(loss):
-                raise FloatingPointError("FT_R13_NON_FINITE: non-finite training loss")
+                raise NonFiniteError("FT_R13_NON_FINITE", "non-finite training loss")
 
             optimizer.zero_grad()
             loss.backward()

@@ -123,3 +123,50 @@ def test_embeddings_ft_gate_blocks_before_any_parquet_read(
             "ds-ft-noread-2", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
         )
     assert exc.value.code == "FT_R01_CONFIG_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("block", "key", "bad_value"),
+    [
+        ("encoder", "device", "gpu"),  # fora de {"auto","cpu","cuda"}
+        ("encoder", "max_length", 0),  # precisa ser int positivo
+        ("encoder", "num_threads", -1),  # precisa ser int positivo ou None
+        ("context", "weight", -0.5),  # precisa ser >= 0
+        ("probe", "alpha", 0),  # precisa ser > 0
+        ("probe", "solver", "not-a-solver"),  # fora do allow-list do Ridge
+        ("finetune", "epochs_max", -1),  # precisa ser int positivo
+        ("finetune", "patience", -1),  # precisa ser int >= 0
+        ("finetune", "dropout", 5.0),  # fora de [0.0, 1.0]
+        ("finetune", "warmup_ratio", -0.1),  # fora de [0.0, 1.0]
+        ("finetune", "freeze_word_embeddings", "true"),  # precisa ser bool, não string
+    ],
+)
+def test_embeddings_ft_config_rejects_malformed_values(
+    corpus_root: Path,
+    train_config: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    block: str,
+    key: str,
+    bad_value: object,
+) -> None:
+    """FT-R01: a spec cobre chave 'ausente ou malformada' — valor de tipo/faixa
+    inválida deve abortar com FT_R01_CONFIG_INVALID, exit 2, antes de ler
+    qualquer parquet (mesmo gate F1b do teste acima)."""
+    import pandas as pd
+
+    from train.train import TrainConfigError
+
+    build_synthetic_dataset(corpus_root, "ds-ft-malformed")
+    config = _fast_config(train_config)
+    config["train"]["embeddings"][block][key] = bad_value
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("parquet should not be read before the F1b gate")
+
+    monkeypatch.setattr(pd, "read_parquet", _boom)
+
+    with pytest.raises(TrainConfigError) as exc:
+        build_candidate(
+            "ds-ft-malformed", config, datasets_dir=corpus_root / "datasets", staging_dir=corpus_root / "staging"
+        )
+    assert exc.value.code == "FT_R01_CONFIG_INVALID"

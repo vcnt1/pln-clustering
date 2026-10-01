@@ -17,6 +17,7 @@ pytest.importorskip("transformers")
 from tests.conftest import build_tiny_encoder
 from train.embeddings_ft import (
     FineTuneSettings,
+    NonFiniteError,
     _compute_features,
     finetune,
     run_probe,
@@ -169,11 +170,11 @@ def test_word_embeddings_receive_gradient_when_not_frozen(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# FT-R13 — perda não finita aborta sem persistir
+# FT-R13 — perda não finita sobre train aborta sem persistir
 # ---------------------------------------------------------------------------
 
 
-def test_finetune_raises_floatingpointerror_on_non_finite_loss(
+def test_finetune_raises_non_finite_error_on_non_finite_train_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     encoder, tokenizer = build_tiny_encoder(tmp_path)
@@ -184,7 +185,7 @@ def test_finetune_raises_floatingpointerror_on_non_finite_loss(
     monkeypatch.setattr(torch, "isfinite", lambda _x: torch.tensor(False))
 
     settings = _default_settings(epochs_max=1)
-    with pytest.raises(FloatingPointError):
+    with pytest.raises(NonFiniteError) as exc_info:
         finetune(
             encoder,
             tokenizer,
@@ -198,6 +199,55 @@ def test_finetune_raises_floatingpointerror_on_non_finite_loss(
             probe_coef=coef,
             probe_intercept=intercept,
         )
+
+    assert exc_info.value.code == "FT_R13_NON_FINITE"
+
+
+# ---------------------------------------------------------------------------
+# FT-R23 — previsão não finita sobre validation aborta sem persistir
+# ---------------------------------------------------------------------------
+
+
+def test_run_probe_raises_non_finite_error_on_non_finite_validation_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encoder, tokenizer = build_tiny_encoder(tmp_path)
+    train_df, validation_df = _toy_dataset()
+    monkeypatch.setattr(np, "isfinite", lambda _x: np.zeros_like(_x, dtype=bool))
+
+    with pytest.raises(NonFiniteError) as exc_info:
+        run_probe(encoder, tokenizer, train_df, validation_df, MAX_LENGTH, CONTEXT_WEIGHT, "cpu", 1.0, "lsqr")
+
+    assert exc_info.value.code == "FT_R23_NON_FINITE_VALIDATION"
+
+
+def test_finetune_raises_non_finite_error_on_non_finite_validation_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encoder, tokenizer = build_tiny_encoder(tmp_path)
+    train_df, validation_df = _toy_dataset()
+    coef, intercept, _ = run_probe(
+        encoder, tokenizer, train_df, validation_df, MAX_LENGTH, CONTEXT_WEIGHT, "cpu", 1.0, "lsqr"
+    )
+    monkeypatch.setattr(np, "isfinite", lambda _x: np.zeros_like(_x, dtype=bool))
+
+    settings = _default_settings(epochs_max=1)
+    with pytest.raises(NonFiniteError) as exc_info:
+        finetune(
+            encoder,
+            tokenizer,
+            train_df,
+            validation_df,
+            MAX_LENGTH,
+            CONTEXT_WEIGHT,
+            "cpu",
+            settings,
+            seed=42,
+            probe_coef=coef,
+            probe_intercept=intercept,
+        )
+
+    assert exc_info.value.code == "FT_R23_NON_FINITE_VALIDATION"
 
 
 # ---------------------------------------------------------------------------

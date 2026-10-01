@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -127,21 +128,72 @@ def _build_pipeline(hyperparameters: dict[str, Any]) -> Pipeline:
 # ---------------------------------------------------------------------------
 
 
-_EMBEDDINGS_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
-    "encoder": ("source", "revision", "max_length", "device", "num_threads"),
-    "context": ("weight",),
-    "probe": ("alpha", "solver"),
-    "finetune": (
-        "epochs_max",
-        "patience",
-        "batch_size",
-        "lr_encoder",
-        "lr_head",
-        "weight_decay",
-        "warmup_ratio",
-        "dropout",
-        "freeze_word_embeddings",
-    ),
+_VALID_DEVICES = {"auto", "cpu", "cuda"}
+_VALID_RIDGE_SOLVERS = {"auto", "svd", "cholesky", "lsqr", "sparse_cg", "sag", "saga", "lbfgs"}
+
+
+def _is_nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_nonneg_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_positive_int_or_none(value: Any) -> bool:
+    return value is None or _is_positive_int(value)
+
+
+def _is_positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _is_nonneg_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+
+
+def _is_unit_interval(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0.0 <= value <= 1.0
+
+
+def _is_bool(value: Any) -> bool:
+    return isinstance(value, bool)
+
+
+# FT-R01: cada chave listada abaixo precisa existir E ter um valor que passe no
+# predicado — "malformada" (spec 11 §7) cobre os dois casos. As chaves obrigatórias
+# vêm de `validators.keys()`, uma única fonte de verdade (nunca uma lista de nomes
+# separada da checagem de valor).
+_EMBEDDINGS_FIELD_VALIDATORS: dict[str, dict[str, Callable[[Any], bool]]] = {
+    "encoder": {
+        "source": _is_nonempty_str,
+        "revision": _is_nonempty_str,
+        "max_length": _is_positive_int,
+        "device": lambda value: value in _VALID_DEVICES,
+        "num_threads": _is_positive_int_or_none,
+    },
+    "context": {
+        "weight": _is_nonneg_number,
+    },
+    "probe": {
+        "alpha": _is_positive_number,
+        "solver": lambda value: value in _VALID_RIDGE_SOLVERS,
+    },
+    "finetune": {
+        "epochs_max": _is_positive_int,
+        "patience": _is_nonneg_int,
+        "batch_size": _is_positive_int,
+        "lr_encoder": _is_positive_number,
+        "lr_head": _is_positive_number,
+        "weight_decay": _is_nonneg_number,
+        "warmup_ratio": _is_unit_interval,
+        "dropout": _is_unit_interval,
+        "freeze_word_embeddings": _is_bool,
+    },
 }
 
 
@@ -170,21 +222,27 @@ def _check_embeddings_deps() -> None:
 
 def _check_embeddings_config(config: dict[str, Any]) -> None:
     """FT-R01: toda chave de `train.embeddings.<bloco>` listada em
-    `_EMBEDDINGS_REQUIRED_KEYS` precisa existir — sem default no código."""
+    `_EMBEDDINGS_FIELD_VALIDATORS` precisa existir e ter um valor válido —
+    sem default no código."""
     embeddings_config = config.get("train", {}).get("embeddings")
     if not isinstance(embeddings_config, dict):
         raise TrainConfigError("FT_R01_CONFIG_INVALID", "train.embeddings is missing or not a mapping")
 
-    for block, required_keys in _EMBEDDINGS_REQUIRED_KEYS.items():
+    for block, validators in _EMBEDDINGS_FIELD_VALIDATORS.items():
         block_config = embeddings_config.get(block)
         if not isinstance(block_config, dict):
             raise TrainConfigError(
                 "FT_R01_CONFIG_INVALID", f"train.embeddings.{block} is missing or not a mapping"
             )
-        missing = [key for key in required_keys if key not in block_config]
+        missing = [key for key in validators if key not in block_config]
         if missing:
             raise TrainConfigError(
                 "FT_R01_CONFIG_INVALID", f"train.embeddings.{block} missing required keys: {missing}"
+            )
+        invalid = [key for key, is_valid in validators.items() if not is_valid(block_config[key])]
+        if invalid:
+            raise TrainConfigError(
+                "FT_R01_CONFIG_INVALID", f"train.embeddings.{block} has invalid values for: {invalid}"
             )
 
 
@@ -195,7 +253,7 @@ def _fit_embeddings_ft(train_df: pd.DataFrame, validation_df: pd.DataFrame, hype
     `train_manifest.json` (FT-R14). Imports de torch/transform.embeddings/
     train.embeddings_ft são *lazy*: só quem pede `algorithm=embeddings-ft`
     paga esse custo (FT-R02) — os módulos de A nunca importam torch."""
-    from train.embeddings_ft import FineTuneSettings, fit_embeddings_ft
+    from train.embeddings_ft import FineTuneSettings, NonFiniteError, fit_embeddings_ft
     from transform.embeddings import (
         EmbeddingMoodModel,
         EncoderSettings,
@@ -247,8 +305,8 @@ def _fit_embeddings_ft(train_df: pd.DataFrame, validation_df: pd.DataFrame, hype
             hyperparameters["seed"],
             device,
         )
-    except FloatingPointError as exc:
-        raise TrainSanityError("FT_R13_NON_FINITE", str(exc)) from exc
+    except NonFiniteError as exc:
+        raise TrainSanityError(exc.code, exc.detail) from exc
 
     candidate = EmbeddingMoodModel(encoder_settings, context_weight, coef, intercept).bind(encoder, tokenizer)
     return candidate, info
@@ -438,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
         _log(logging.ERROR, "gate_blocked", run_id=run_id, reason=exc.code, detail=exc.detail)
         return 3
     except TrainSanityError as exc:
-        _log(logging.ERROR, "sanity_check_failed", run_id=run_id, model="candidate", detail=exc.detail)
+        _log(logging.ERROR, "sanity_check_failed", run_id=run_id, model="candidate", reason=exc.code, detail=exc.detail)
         return 4
     except TrainConfigError as exc:
         _log(logging.ERROR, "config_invalid", run_id=run_id, reason=exc.code, detail=exc.detail)

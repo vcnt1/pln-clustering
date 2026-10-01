@@ -113,6 +113,7 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 - **FT-R11** O fine-tuning DEVE usar `validation` apenas para early stopping e restaurar o melhor checkpoint; `test` DEVE NÃO ser lido em `train.train`.
 - **FT-R12** Todo componente estocástico (init da cabeça, dropout, embaralhamento, `DataLoader`) DEVE receber a `seed` do config.
 - **FT-R13** QUANDO a perda ou uma previsão sobre `train` não for finita, `train.train` DEVE abortar sem persistir, *exit* 4 (`FT_R13_NON_FINITE`).
+- **FT-R23** QUANDO uma previsão sobre `validation` durante a sondagem linear (etapa 1) ou o fine-tuning (etapa 2) não for finita, `train.train` DEVE abortar sem persistir, *exit* 4 (`FT_R23_NON_FINITE_VALIDATION`). Distinto de FT-R13: é uma rede de segurança sobre `validation`, não o requisito de `train`.
 - **FT-R14** O `train_manifest.json` DEVE registrar `device`, `torch_version`, `probe_validation_mae`, `finetune_validation_mae` e `epochs_run`.
 - **FT-R15** O fingerprint DEVE incluir `revision` do encoder; mudar `revision` DEVE gerar staging novo.
 
@@ -135,6 +136,7 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 | `FT_R02_DEPS_MISSING` | FT-R02 | 2 |
 | `FT_R04_REVISION_MISSING` | FT-R04 | 2 |
 | `FT_R13_NON_FINITE` | FT-R13 | 4 |
+| `FT_R23_NON_FINITE_VALIDATION` | FT-R23 | 4 |
 | `FT_ENCODER_UNAVAILABLE` (download falhou no treino) | — | 3 |
 | `TN_R17_UNSUPPORTED_ALGORITHM` | ampliado: aceita `embeddings-ft` | 2 |
 
