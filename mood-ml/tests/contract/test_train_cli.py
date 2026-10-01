@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
+import common.io as common_io
 import train.train as train_cli
 from tests.conftest import build_synthetic_dataset
 
@@ -157,6 +159,33 @@ def test_different_hyperparameter_creates_new_staging_and_keeps_old(corpus_root:
     assert len(all_staging_dirs) == 2
     # the original staging directory's manifest is untouched
     assert (first_staging / "train_manifest.json").read_bytes() == first_manifest_bytes
+
+
+def test_io_retry_on_read_carries_the_run_id(
+    corpus_root: Path, train_config: dict, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    build_synthetic_dataset(corpus_root, "ds-retry")
+    config_path = _write_config(corpus_root, train_config)
+    monkeypatch.setattr(common_io.time, "sleep", lambda _seconds: None)
+
+    real_read_parquet = train_cli.pd.read_parquet
+    calls = {"n": 0}
+
+    def _fails_once(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(13, "locked")
+        return real_read_parquet(*args, **kwargs)
+
+    monkeypatch.setattr(train_cli.pd, "read_parquet", _fails_once)
+
+    assert train_cli.main(_train_argv(corpus_root, "ds-retry", config_path)) == 0
+    # Spec 06 §5: run_id is mandatory on every line, io_retry included.
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line]
+    started = next(e for e in events if e["event"] == "train_started")
+    retry = next(e for e in events if e["event"] == "io_retry")
+    assert retry["operation"] == "read_train_parquet"
+    assert retry["run_id"] == started["run_id"]
 
 
 def test_no_duckdb_reference_in_train() -> None:

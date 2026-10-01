@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import common.io as common_io
 from labels.build import LabelGateError, LabelSanityError, build_labels
 from tests.conftest import approved_sample_corpus, write_corpus
 
@@ -196,7 +197,7 @@ def test_read_is_retried_on_transient_oserror(
     import labels.build as labels_build
 
     path = approved_sample_corpus(corpus_root)
-    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(common_io.time, "sleep", lambda s: None)
     monkeypatch.setattr(labels_build, target, _flaky(getattr(labels_build, target), failures=2))
 
     rows, _ = build_labels(path, report_dir=corpus_root / "reports")
@@ -210,7 +211,7 @@ def test_read_exhausting_retries_exits_1_with_io_failed(
     import labels.build as labels_build
 
     path = approved_sample_corpus(corpus_root)
-    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(common_io.time, "sleep", lambda s: None)
     monkeypatch.setattr(labels_build, target, _flaky(getattr(labels_build, target), failures=99))
 
     with pytest.raises(labels_build.LabelIOError):
@@ -229,7 +230,7 @@ def test_post_write_oserror_exits_1_instead_of_escaping_main(
     import labels.build as labels_build
 
     path = approved_sample_corpus(corpus_root)
-    monkeypatch.setattr(labels_build.time, "sleep", lambda s: None)
+    monkeypatch.setattr(common_io.time, "sleep", lambda s: None)
     monkeypatch.setattr(labels_build, "sha256_and_size", _flaky(labels_build.sha256_and_size, failures=99))
 
     code = labels_build.main(
