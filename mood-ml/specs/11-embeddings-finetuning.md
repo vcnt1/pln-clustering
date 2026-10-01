@@ -1,7 +1,7 @@
 # 11 — Abordagem C: embeddings com fine-tuning (revisão das specs 06, 07, 08)
 
-**Status:** Proposta · **Versão da spec:** `ft-1` · **Data:** 2026-09-25
-**Implementa:** abordagem C da [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md), com a mudança da [ADR-0009](../../decisions/ADR-0009-abordagem-c-com-fine-tuning.md) (**proposta, depende de aprovação**)
+**Status:** Aceita · **Versão da spec:** `ft-1` · **Data:** 2026-09-25
+**Implementa:** abordagem C da [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md), com a mudança da [ADR-0009](../../decisions/ADR-0009-abordagem-c-com-fine-tuning.md)
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md), [ADR-0002](../../decisions/ADR-0002-origem-do-ground-truth.md), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md); constitution P3, P4; specs [04](04-transform.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md)
 **Consumido por:** `train/train.py`, `evaluate/metrics.py`, `registry/registry.py`, `infer/predict.py`
 **Implementado em:** `transform/embeddings.py` (novo), `train/train.py` (ramo C), demais módulos com ajustes pontuais (§8)
@@ -164,12 +164,19 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 
 ## 10. Riscos e perguntas em aberto
 
+**Resolvidas em 2026-09-30:**
+
+- **Q1 — Hardware de treino:** GPU disponível (GTX 1660). Há também orçamento em CPU: o
+  treino cabe no tempo necessário em uma máquina com AMD Ryzen 5 5600X (6 núcleos).
+  `train.embeddings.encoder.device: auto` cobre os dois casos.
+- **Q2 — Orçamento de latência p95:** critério brando no MVP. A prioridade é implementar
+  embeddings e fine-tuning; otimizar latência fica para quando C for avaliado para
+  promoção (ADR-0009, "Orçamento de latência").
+- **Q4 — Aprovação da ADR-0009:** aceita. Esta spec pode ser implementada.
+
 | # | Pergunta / risco | Tipo | Quem responde |
 |---|---|---|---|
-| Q1 | **Hardware de treino:** há GPU disponível? Sem ela, o treino em CPU precisa caber num orçamento. Hipótese a medir na 1ª tarefa: ≤ 30 min em CPU de 8 threads (estimativa: ~22 mil passagens equivalentes por época, 5 épocas). | Bloqueante | Você |
-| Q2 | **Orçamento de latência p95** de inferência (ADR-0008 deixou em aberto). Histórico cheio = até 30 codificações por request. | Bloqueante para promover C, não para implementar | Você / ADR posterior |
 | Q3 | **`revision`** do encoder: fixar o SHA do hub na implementação. | Não bloqueante | Implementação |
-| Q4 | **Aprovação da ADR-0009.** Esta spec não deve ser implementada antes dela. | Bloqueante | Você |
 | R1 | Sobreajuste ao gerador sintético; diferença A × C pouco informativa. | Risco | TCC (declarar) |
 | R2 | Só CPU garante pesos idênticos entre execuções. | Risco | TCC / manifesto registra `device` |
 
@@ -186,12 +193,12 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 
 Fase 6, branch `feat/ml-embeddings`; a spec é commitada **antes** do código.
 
-- [ ] Aprovar ADR-0009 e esta spec (Status → Aceita)
+- [x] Aprovar ADR-0009 e esta spec (Status → Aceita)
 - [ ] `requirements-embeddings.txt`; job de CI separado (FT-R02, FT-R03)
 - [ ] Fixture do BERT minúsculo; testes vermelhos a partir de CA-01 a CA-12
 - [ ] `transform/embeddings.py`: codificação, pooling, `EmbeddingMoodModel`, save/load com `encoder/` (FT-R05 a FT-R09, FT-R16)
 - [ ] `train/train.py`: ramo C, etapa 1 e etapa 2, early stopping, checkpoint (FT-R10 a FT-R15)
-- [ ] Spike: medir tempo de treino e latência com o encoder real; responder Q1 e Q2 com números
+- [ ] Spike: medir tempo de treino e latência com o encoder real nesta máquina (Ryzen 5 5600X / GTX 1660) e registrar os números (Q1 e Q2 já resolvidos como decisão; falta a medição)
 - [ ] `evaluate/metrics.py`: latência com 30 mensagens e `comparison` (FT-R20, FT-R21)
 - [ ] `registry/registry.py`: copiar `encoder/` de forma atômica (FT-R16)
 - [ ] `infer/predict.py`: algoritmo aceito, carga offline, aquecimento, falha sem dependências (FT-R17 a FT-R19)

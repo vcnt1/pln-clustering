@@ -17,6 +17,8 @@ Formato: Contexto → Decisão → Consequências → Alternativas. Uma ADR acei
 
 > **Substituição (2026-09-18):** a arquitetura do modelo e o formato de features passaram ao registro canônico, na [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md). Ela mantém os dois blocos da ADR-003 e a abordagem TF-IDF + Ridge da ADR-004 (abordagem A), guarda o contexto como lista e acrescenta a abordagem C (embeddings congelados). As ADR-003 e 004 abaixo ficam só como registro histórico.
 
+> **Revisão parcial (2026-09-30):** a [ADR-0009](../../decisions/ADR-0009-abordagem-c-com-fine-tuning.md), aceita, substitui parcialmente a ADR-0008: a abordagem C passa a ajustar o encoder (fine-tuning), não só a cabeça de regressão (`algorithm = "embeddings-ft"`, detalhada na [spec 11](11-embeddings-finetuning.md)). O restante da ADR-0008 — os dois blocos, a abordagem A e o formato de features — continua valendo.
+
 ---
 
 ## ADR-001 — Escala `-1 to 1` (ADR-0001) com rótulos de treino em 5 níveis

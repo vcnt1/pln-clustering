@@ -34,7 +34,8 @@ ADRs vigentes:
 | [ADR-0004](../decisions/ADR-0004-retentativa-e-quarentena.md) | Retentativa absorvida pela próxima mensagem; quarentena após 3 falhas | 2.3, 3.6, 3.7 |
 | [ADR-0006](../decisions/ADR-0006-sem-encerramento-no-mvp.md) | Duas rotas públicas; encerramento de conversa fora do MVP | 2.1, 3.2, 7 |
 | [ADR-0007](../decisions/ADR-0007-humor-por-conversa.md) | Humor pertence à conversa; janela de 30 mensagens `customer` **da conversa** | 2.2, 2.3, 3.3, 3.4, 3.7, 4.4, 6 (T5) |
-| [ADR-0008](../decisions/ADR-0008-abordagens-de-modelo.md) | T3 em dois blocos (disparadora + contexto); abordagem A (TF-IDF + Ridge) primeiro, C (embeddings congelados + Ridge) depois | 4.3, 4.4, 6 (T3), 9 |
+| [ADR-0008](../decisions/ADR-0008-abordagens-de-modelo.md) | T3 em dois blocos (disparadora + contexto); abordagem A (TF-IDF + Ridge) primeiro, C depois | 4.3, 4.4, 6 (T3), 9 |
+| [ADR-0009](../decisions/ADR-0009-abordagem-c-com-fine-tuning.md) | Abordagem C passa a ajustar o encoder (fine-tuning), não só a cabeça; `algorithm = "embeddings-ft"` | 4.4, 6 (T3), 9 |
 
 Substituídos, mantidos apenas como registro histórico: [ADR-0003](../decisions/ADR-0003-ciclo-de-vida-da-conversa.md) (ciclo de vida com encerramento) por ADR-0006, e [ADR-0005](../decisions/ADR-0005-janela-de-historico.md) (janela com escopo de cliente) por ADR-0007.
 
@@ -483,7 +484,8 @@ Registro de modelos. É a fonte da verdade para o valor `model_version` gravado 
 | `dataset_id`, `label_set_id`, `feature_spec_version` | sim | Rastreabilidade até os dados e as features de treino |
 | `history_window`, `history_scope` | sim | `30` e `"conversation"` (ADR-0007). **Conferidos no carregamento do modelo**: divergência em relação ao comportamento da API viola P4 e impede subir o serviço |
 | `metrics` | sim | Métricas de **regressão** (MAE, RMSE, Spearman). Acurácia não se aplica (ADR-0001) |
-| `algorithm` | sim | `"tfidf-ridge"` (abordagem A) ou `"embeddings-ridge"` (abordagem C), conforme ADR-0008. Identifica a vetorização, que vive dentro do artefato |
+| `algorithm` | sim | `"tfidf-ridge"` (abordagem A, ADR-0008) ou `"embeddings-ft"` (abordagem C, ADR-0009). Identifica a vetorização, que vive dentro do artefato |
+| `encoder` | só em `algorithm = "embeddings-ft"` | `{source, revision, max_length}` do encoder de sentenças ajustado (ADR-0009, spec 11 do mood-ml) |
 | `code_commit` | sim | Commit do código que treinou o modelo |
 
 O placeholder `"untrained"` do scaffold ([predict.py](../mood-ml/infer/predict.py)) nunca pode chegar a `mood_scores` (P3).

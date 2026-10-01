@@ -1,9 +1,9 @@
 # ADR-0009: Abordagem C passa a ter fine-tuning do encoder
 
-- **Status:** proposto
+- **Status:** aceito
 - **Data:** 2026-09-25
 - **Princípios tocados:** P3, P4
-- **Substitui parcialmente:** [ADR-0008](ADR-0008-abordagens-de-modelo.md), nas seções "Abordagem C — implementada depois" e "Alternativas → Abordagem C com fine-tuning". O restante da ADR-0008 continua valendo.
+- **Substitui parcialmente:** [ADR-0008](ADR-0008-abordagens-de-modelo.md), nas seções "Abordagem C — implementada depois", "Alternativas → Abordagem C com fine-tuning" e o item "versão ativa do modelo" de "Em aberto, adiado deliberadamente". O restante da ADR-0008 continua valendo.
 - **Depende de:** [ADR-0001](ADR-0001-escala-do-humor.md), [ADR-0002](ADR-0002-origem-do-ground-truth.md), [ADR-0007](ADR-0007-humor-por-conversa.md)
 - **Detalhamento:** [`mood-ml/specs/11-embeddings-finetuning.md`](../mood-ml/specs/11-embeddings-finetuning.md)
 
@@ -27,6 +27,13 @@ Duas coisas mudaram o cálculo:
 O segundo motivo da ADR-0008 (dados reais em volume) **não muda**: o corpus segue
 sintético (ADR-0002), com 1.755 exemplos de treino em 126 clientes no dataset atual.
 
+O objetivo desta ADR deixa de ser medir qual representação de texto é melhor para
+fins de comparação entre A e C. O propósito central passa a ser preparar o modelo
+para operar sobre uma base real de atendimentos: a comparação entre A e C continua
+acontecendo, mas como efeito colateral registrável, não como fim. O critério de
+sucesso de C deixa de ser "supera A no corpus sintético" e passa a ser "serve de
+base viável para produção quando dados reais estiverem disponíveis".
+
 ## Decisão
 
 - A abordagem C passa a **ajustar o encoder** (fine-tuning) junto com a cabeça linear de
@@ -43,6 +50,14 @@ sintético (ADR-0002), com 1.755 exemplos de treino em 126 clientes no dataset a
 - O `validation` passa a decidir o **early stopping** do fine-tuning. O `test` continua
   intocado até a avaliação.
 - O encoder específico e os hiperparâmetros ficam na spec 11 e em `configs/pipeline.yaml`.
+- **Hardware de treino:** GPU disponível (GTX 1660); há também orçamento em CPU — o treino cabe no tempo necessário em uma máquina com AMD Ryzen 5 5600X (6 núcleos). `device` é configurável (`auto | cpu | cuda`, spec 11), sem decisão fixa de qual usar.
+- **Orçamento de latência:** para o MVP, o critério é brando. A prioridade é implementar embeddings e fine-tuning; otimizar a latência p95 fica para quando C for avaliado para promoção (ver "Versão ativa", abaixo).
+- **Versão ativa:** por ora, a validação externa em dados reais (ADR-0002, "Validação
+  externa, fora do escopo do MVP") não é viável. A promoção de qualquer versão (A ou C)
+  a ativa continua regida só pelo quality gate já existente (candidato vs. baseline, na
+  spec de treino e avaliação). Fica registrada a expectativa de que um teste em dados
+  reais seja incorporado a esse critério no futuro, quando viável — não é um requisito
+  em vigor hoje.
 
 ## Alternativas consideradas
 
@@ -61,6 +76,13 @@ sobreajuste com 1,7 mil exemplos, sem ganho esperado.
 **Adiada.** Modelo maior, sem versão de sentenças pronta. Fica como troca de configuração
 possível, depois que o pipeline com o encoder pequeno estiver validado.
 
+### Manter a moldura de comparação entre A e C como objetivo central
+
+**Rejeitada.** Medir qual representação de texto vence no corpus sintético não diz, por
+si só, se o modelo está pronto para uma base real de atendimentos. A comparação continua
+registrada como resultado, mas o critério que orienta a implementação passa a ser a
+viabilidade de produção.
+
 ## Consequências
 
 **Facilita**
@@ -77,8 +99,9 @@ possível, depois que o pipeline com o encoder pequeno estiver validado.
   fingerprint identifica as entradas, não os bits do resultado.
 - **Artefato maior:** o modelo passa a ser um diretório (`model.joblib` + `encoder/`, ~470 MB
   em fp32), o que exige ajuste no registro e na inferência (specs 07 e 08).
-- **Latência:** uma requisição com histórico cheio codifica até 30 mensagens. O orçamento
-  de latência continua em aberto (ADR-0008) e passa a ser mais crítico.
+- **Latência:** uma requisição com histórico cheio codifica até 30 mensagens. O critério é
+  brando no MVP (ver "Orçamento de latência" em Decisão), mas o custo por requisição é
+  maior que em A — relevante quando a latência for revisitada para promoção.
 - **Rede no treino:** o download do encoder base acontece uma vez, no treino, com
   `revision` fixada. A inferência nunca acessa a rede.
 
@@ -89,11 +112,15 @@ possível, depois que o pipeline com o encoder pequeno estiver validado.
 
 **Em aberto, adiado deliberadamente**
 
-- Versão ativa e orçamento de latência (ADR posterior, baseada na spec de avaliação).
+- Critério de gatilho para migrar `label_source` de sintético para `manual`/`csat`
+  (depende de volume de dados reais ainda não disponível).
+- Protocolo de anotação manual para a validação externa prevista na ADR-0002 (depende
+  de recursos/parceria ainda não definidos).
+- Base legal, retenção e expurgo de dados reais (decisão fora do escopo técnico do
+  mood-ml).
 - Ponderação por recência no contexto (já em aberto na ADR-0007).
 
-## Documentos a alinhar quando aceita
+## Documentos alinhados
 
-- `mood-ml/specs/00-decisoes.md`: registrar esta ADR na tabela.
-- `mood-ml/CLAUDE.md`: §4 (linha "C, depois") e §8 (fase 6).
+- `mood-ml/specs/00-decisoes.md`: registra esta ADR.
 - `data-structure/data-model.md` §4.4: campo `encoder` opcional no manifesto.
