@@ -133,7 +133,7 @@ Já especificada pela ADR-0008 no nível de contrato; esta seção fixa o compor
 - `text_clean` = resultado do último item. `context_clean` = resultados dos itens anteriores, ordem preservada, lista vazia se `len(history) == 1`.
 - Nenhuma truncagem silenciosa: um `history` com mais de 30 itens é erro do chamador (violaria a ADR-0007), não motivo para descartar os excedentes calados.
 
-**Fora desta spec, mencionado para contexto**: a vetorização de `text_clean`/`context_clean` (TF-IDF na abordagem A, embeddings na C) não acontece aqui — vive dentro do `Pipeline` serializado em `model.joblib` (ADR-0008, spec 06/07). `extract_features` para no texto, nunca produz vetor.
+**Fora desta spec, mencionado para contexto**: a vetorização de `text_clean`/`context_clean` não acontece aqui — `extract_features` para no texto, nunca produz vetor. Na abordagem A (TF-IDF), a vetorização vive inteira dentro do `Pipeline` serializado em `model.joblib` (ADR-0008, spec 06/07). Na abordagem C (embeddings com fine-tuning, ADR-0009), parte da lógica de vetorização — *pooling* e *encoding* — mora em `transform/embeddings.py` (spec 11), um módulo irmão deste dentro do mesmo pacote `transform/`, mas os pesos ajustados ficam no artefato (`encoder/` + `candidate.joblib`), não no código. O encoder específico de C é fixado na spec 11, não aqui: a ADR-0008 delegava essa escolha para "a spec de T3", mas T3 (esta spec) termina no texto — quem fixa o encoder é a spec 11, que é quem de fato o consome. `fs-1` (esta spec) não muda com isso: T1, T2 e a montagem dos blocos são idênticos nas duas abordagens.
 
 ### 3.5 Volumetria estimada e frequência de execução
 
@@ -259,7 +259,7 @@ Nenhuma referência a `duckdb` ou caminho `.duckdb` nesta camada — verificaç�
 ## 10. Fora de escopo
 
 - **Reconstrução da janela de histórico (T5)** — o que entra em `history` antes de chegar a `extract_features`. Decidido pela ADR-0007; implementado pela API (online) e por `transform/split.py` a partir do corpus (offline, spec 05). O teste de contrato que prova que as duas reconstruções seguem a mesma regra está em [05-split.md](05-split.md), requisito SP-R20 — é lá que a reconstrução acontece; esta spec só consome o resultado já pronto.
-- **Vetorização** (TF-IDF ou embeddings) — vive dentro do `Pipeline` serializado, fora de `transform/` (ADR-0008, specs 06/07).
+- **Vetorização** — na abordagem A, TF-IDF inteira dentro do `Pipeline` serializado (specs 06/07); na abordagem C, *pooling*/*encoding* em `transform/embeddings.py` e pesos ajustados no artefato (spec 11). Nenhum dos dois casos é tratado por esta spec, que termina em `extract_features`.
 - **Detecção de nomes próprios ou outros tipos de PII** — decisão do usuário (D1); registrado como limitação, não como pendência a resolver depois.
 - **Remoção de mensagens automáticas** — mencionado no placeholder do `data-model.md §6` para T1, mas inaplicável ao MVP (corpus não tem esse conceito).
 - **Memoização/cache de T1+T2 por `message_id`** durante a construção do dataset — decisão de `transform/split.py` (spec 05), não desta camada.

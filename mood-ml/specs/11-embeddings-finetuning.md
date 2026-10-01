@@ -4,7 +4,7 @@
 **Implementa:** abordagem C da [ADR-0008](../../decisions/ADR-0008-abordagens-de-modelo.md), com a mudança da [ADR-0009](../../decisions/ADR-0009-abordagem-c-com-fine-tuning.md)
 **Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md), [ADR-0002](../../decisions/ADR-0002-origem-do-ground-truth.md), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md); constitution P3, P4; specs [04](04-transform.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md)
 **Consumido por:** `train/train.py`, `evaluate/metrics.py`, `registry/registry.py`, `infer/predict.py`
-**Implementado em:** `transform/embeddings.py` (novo), `train/train.py` (ramo C), demais módulos com ajustes pontuais (§8)
+**Implementado em:** `transform/embeddings.py` (novo — código compartilhado por treino e inferência: pooling, encoding, o wrapper `EmbeddingMoodModel`), `train/embeddings_ft.py` (novo — loop de treino: sondagem linear, fine-tuning com AdamW, early stopping; fica fora de `transform/` porque carrega otimizador e scheduler, que não são código de inferência), `train/train.py` (ramo C: dispatch por `algorithm`, validação de config, orquestração), demais módulos com ajustes pontuais (§8)
 
 ---
 
@@ -68,6 +68,8 @@ train:
       freeze_word_embeddings: true
 ```
 
+`max_length` fica só em `encoder.max_length` — é um parâmetro da tokenização (igual no treino e na inferência, FT-R07), não do fine-tuning. Não duplicar em `finetune`.
+
 ## 5. Artefatos
 
 | Onde | Conteúdo |
@@ -78,7 +80,7 @@ train:
 - `candidate.joblib` guarda o wrapper `EmbeddingMoodModel` (`transform/embeddings.py`): hiperparâmetros, `w`, pesos da cabeça (numpy) e o caminho **relativo** `encoder/`. **Não** serializa tensores do torch no pickle. A classe vive em `transform/embeddings.py` (módulo de biblioteca, nunca ponto de entrada `-m`), pelo mesmo motivo de `join_context_list` (ver `transform/features.py`).
 - O wrapper expõe `predict(df) -> np.ndarray` com as mesmas colunas de A (`text_clean`, `context_clean`), para `run_inference` funcionar sem mudança.
 - `manifest.json` ganha `encoder: {source, revision, max_length}` (extensão da data-model §4.4, no padrão de `training_fingerprint`). `algorithm = "embeddings-ft"`.
-- **Fingerprint** (spec 06 §3.3): inclui `algorithm`, todo o bloco `train.embeddings` (com `revision`), hashes dos `.parquet` e `feature_spec_version`.
+- **Fingerprint** (spec 06 §3.3): via `hyperparameters_for("embeddings-ft", train_config)`, que devolve só `{"seed", "embeddings"}` — não o bloco `train:` inteiro (isso excluiria `ridge`/`tfidf_word`/`tfidf_char`/`context` de A, que não afetam C). Inclui `algorithm`, `seed`, todo o bloco `train.embeddings` (com `revision`), hashes dos `.parquet` e `feature_spec_version`. A `seed` entra explicitamente porque governa a inicialização da cabeça, o dropout e o embaralhamento (FT-R12) — duas sementes diferentes podem convergir para pesos diferentes, então são staging diferentes.
 - Pesos ficam fora do git (`models/` já está em `.gitignore`).
 
 ## 6. Métricas e comparação
@@ -94,7 +96,7 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 ## 7. Requisitos verificáveis
 
 **Configuração e dependências**
-- **FT-R01** QUANDO `train.algorithm = "embeddings-ft"`, o sistema DEVE ler os hiperparâmetros de `train.embeddings`; nenhum hiperparâmetro DEVE estar fixo no código.
+- **FT-R01** QUANDO `train.algorithm = "embeddings-ft"`, o sistema DEVE ler os hiperparâmetros de `train.embeddings`; nenhum hiperparâmetro DEVE estar fixo no código. QUANDO uma chave obrigatória estiver ausente ou malformada, o sistema DEVE abortar com *exit* 2 (`FT_R01_CONFIG_INVALID`), sem ler os `.parquet`.
 - **FT-R02** QUANDO `torch`/`transformers` não estiverem instalados, `train.train` DEVE abortar com *exit* 2 (`FT_R02_DEPS_MISSING`), sem ler os `.parquet`. Os módulos de A DEVEM NÃO importar `torch`.
 - **FT-R03** Dependências de C DEVEM ficar em `requirements-embeddings.txt`; `requirements.txt` DEVE permanecer inalterado.
 - **FT-R04** QUANDO `revision` estiver ausente ou vazia, `train.train` DEVE abortar com *exit* 2.
@@ -129,6 +131,7 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 
 | Código | Requisito | Exit |
 |---|---|---|
+| `FT_R01_CONFIG_INVALID` (chave obrigatória ausente ou malformada em `train.embeddings`) | FT-R01 | 2 |
 | `FT_R02_DEPS_MISSING` | FT-R02 | 2 |
 | `FT_R04_REVISION_MISSING` | FT-R04 | 2 |
 | `FT_R13_NON_FINITE` | FT-R13 | 4 |
@@ -173,10 +176,23 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
   embeddings e fine-tuning; otimizar latência fica para quando C for avaliado para
   promoção (ADR-0009, "Orçamento de latência").
 - **Q4 — Aprovação da ADR-0009:** aceita. Esta spec pode ser implementada.
+- **Q3 — `revision` do encoder:** fixada em `e8f8c211226b894fcb81acc59f3b34ba3efd5f42`
+  (commit do hub em 2026-09-30, obtido via `huggingface_hub.HfApi().model_info(...)`) e
+  gravada em `configs/pipeline.yaml`. Validada com `tests/unit/test_embeddings_real_encoder.py`
+  (`@pytest.mark.slow`, roda manualmente): confirma `hidden_size == 384` e o *forward*
+  ponta a ponta (`encode_texts`/`encode_context`/`build_features`) com o encoder real.
+
+**Pendente — spike de hardware (tempo de treino e latência):** a medição de tempo de
+treino e de latência **nesta máquina** (Ryzen 5 5600X / GTX 1660, Q1) ainda não foi
+feita — o ambiente que implementou este código não é essa máquina, então não há número
+confiável para registrar aqui. A implementação já está pronta para rodar o spike:
+`python -m train.train <dataset_id> --config configs/pipeline.yaml` com
+`train.algorithm: embeddings-ft` baixa o encoder real (revision acima) e treina;
+`device: auto` escolhe GPU quando disponível. Falta só executar nesta máquina e
+preencher a tabela abaixo.
 
 | # | Pergunta / risco | Tipo | Quem responde |
 |---|---|---|---|
-| Q3 | **`revision`** do encoder: fixar o SHA do hub na implementação. | Não bloqueante | Implementação |
 | R1 | Sobreajuste ao gerador sintético; diferença A × C pouco informativa. | Risco | TCC (declarar) |
 | R2 | Só CPU garante pesos idênticos entre execuções. | Risco | TCC / manifesto registra `device` |
 
@@ -194,13 +210,16 @@ Limites a declarar no TCC: corpus sintético satura as métricas (A já tem MAE 
 Fase 6, branch `feat/ml-embeddings`; a spec é commitada **antes** do código.
 
 - [x] Aprovar ADR-0009 e esta spec (Status → Aceita)
-- [ ] `requirements-embeddings.txt`; job de CI separado (FT-R02, FT-R03)
-- [ ] Fixture do BERT minúsculo; testes vermelhos a partir de CA-01 a CA-12
-- [ ] `transform/embeddings.py`: codificação, pooling, `EmbeddingMoodModel`, save/load com `encoder/` (FT-R05 a FT-R09, FT-R16)
-- [ ] `train/train.py`: ramo C, etapa 1 e etapa 2, early stopping, checkpoint (FT-R10 a FT-R15)
-- [ ] Spike: medir tempo de treino e latência com o encoder real nesta máquina (Ryzen 5 5600X / GTX 1660) e registrar os números (Q1 e Q2 já resolvidos como decisão; falta a medição)
-- [ ] `evaluate/metrics.py`: latência com 30 mensagens e `comparison` (FT-R20, FT-R21)
-- [ ] `registry/registry.py`: copiar `encoder/` de forma atômica (FT-R16)
-- [ ] `infer/predict.py`: algoritmo aceito, carga offline, aquecimento, falha sem dependências (FT-R17 a FT-R19)
-- [ ] `configs/pipeline.yaml`: bloco `train.embeddings`
-- [ ] Alinhar `CLAUDE.md` (§4, §8), `00-decisoes.md`, specs 04/06/07/08/09 e `data-model.md` §4.4
+- [x] `requirements-embeddings.txt`; job de CI separado (FT-R02, FT-R03)
+- [x] Fixture do BERT minúsculo; testes a partir de CA-01 a CA-12
+- [x] `transform/embeddings.py`: codificação, pooling, `EmbeddingMoodModel`, save/load com `encoder/` (FT-R05 a FT-R09, FT-R16)
+- [x] `train/train.py`: ramo C, etapa 1 e etapa 2, early stopping, checkpoint (FT-R10 a FT-R15)
+- [x] `revision` do encoder fixada e validada com o encoder real (Q3); **pendente:** rodar o spike de tempo de treino/latência nesta máquina (Ryzen 5 5600X / GTX 1660) e registrar os números em §10
+- [x] `evaluate/metrics.py`: latência com 30 mensagens e `comparison` (FT-R20, FT-R21)
+- [x] `registry/registry.py`: copiar `encoder/` de forma atômica (FT-R16)
+- [x] `infer/predict.py`: algoritmo aceito, carga offline, aquecimento, falha sem dependências (FT-R17 a FT-R19)
+- [x] `configs/pipeline.yaml`: bloco `train.embeddings`
+- [x] Alinhar `CLAUDE.md` (§4, §8), `00-decisoes.md`, specs 04/06/07/08/09 e `data-model.md` §4.4
+
+**Código implementado e testado (`pytest -q` + `pytest -q -m "embeddings and not slow"`, 262 testes,
+`ruff check .` limpo); único item em aberto é a medição de hardware real acima.**

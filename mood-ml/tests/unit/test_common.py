@@ -6,7 +6,13 @@ import pytest
 
 import common.io as common_io
 from common.errors import PipelineError
-from common.io import atomic_write, with_io_retry, write_json, write_json_atomic
+from common.io import (
+    atomic_write,
+    atomic_write_dir,
+    with_io_retry,
+    write_json,
+    write_json_atomic,
+)
 from common.log import configure_logging, log
 
 
@@ -121,6 +127,38 @@ def test_ca10_write_json_atomic_matches_write_json_and_leaves_no_tmp(tmp_path: P
 
     assert atomic.read_bytes() == plain.read_bytes()
     assert list(atomic.parent.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# atomic_write_dir — CM-R06, CA-11
+# ---------------------------------------------------------------------------
+
+
+def _write_dir(tmp: Path, content: dict[str, str]) -> None:
+    tmp.mkdir(parents=True)
+    for name, text in content.items():
+        (tmp / name).write_text(text, encoding="utf-8")
+
+
+def test_ca11_atomic_write_dir_replaces_and_leaves_no_tmp(tmp_path: Path) -> None:
+    dest = tmp_path / "nested" / "encoder"
+    atomic_write_dir(dest, lambda tmp: _write_dir(tmp, {"config.json": "{}"}))
+
+    assert (dest / "config.json").read_text(encoding="utf-8") == "{}"
+    assert list(dest.parent.glob("*.tmp")) == []
+
+
+def test_ca11_atomic_write_dir_removes_leftover_tmp_from_interrupted_run(tmp_path: Path) -> None:
+    dest = tmp_path / "encoder"
+    leftover_tmp = tmp_path / "encoder.tmp"
+    leftover_tmp.mkdir()
+    (leftover_tmp / "partial.bin").write_bytes(b"garbage")
+
+    atomic_write_dir(dest, lambda tmp: _write_dir(tmp, {"config.json": "{}"}))
+
+    assert (dest / "config.json").read_text(encoding="utf-8") == "{}"
+    assert not (dest / "partial.bin").exists()
+    assert list(dest.parent.glob("*.tmp")) == []
 
 
 # ---------------------------------------------------------------------------

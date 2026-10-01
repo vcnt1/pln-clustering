@@ -37,3 +37,30 @@ jobs:
 
       - name: Run the offline pipeline end-to-end on the test fixture
         run: make all CORPUS=data/raw/synthetic/syn-2026-01-02-a.jsonl SKIP_COMPOSITION=1
+
+  test-embeddings:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mood-ml
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install base dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install torch (CPU wheel, avoids the default CUDA build)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install embeddings dependencies
+        run: pip install -r requirements-embeddings.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test (abordagem C, spec 11)
+        run: pytest -q -m "embeddings and not slow"

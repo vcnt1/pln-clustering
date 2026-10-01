@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,11 +14,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
 from infer.predict import (
+    EmbeddingsUnavailableError,
     FeatureSpecMismatchError,
     RegistryBrokenError,
     _configure_logging,
     _log,
     load_active_model,
+    warm_up,
 )
 from infer.predict import router as infer_router
 
@@ -40,6 +43,9 @@ def create_app(models_dir: str | Path = Path("models")) -> FastAPI:
         except FeatureSpecMismatchError as exc:
             _log(logging.ERROR, "startup_refused", reason=exc.code, expected=exc.expected, found=exc.found)
             raise
+        except EmbeddingsUnavailableError as exc:
+            _log(logging.ERROR, "startup_refused", reason=exc.code, detail=exc.detail)
+            raise
 
         if state.pipeline is None:
             _log(logging.WARNING, "startup_degraded", reason="active_json_missing")
@@ -53,6 +59,11 @@ def create_app(models_dir: str | Path = Path("models")) -> FastAPI:
                 history_window=state.manifest.get("history_window"),
                 history_scope=state.manifest.get("history_scope"),
             )
+            # IF-R24/FT-R19: antes de aceitar conexões, para a latência do
+            # primeiro request real não incluir carga/primeira inferência.
+            t0 = time.perf_counter()
+            warm_up(state.pipeline)
+            _log(logging.INFO, "model_warmed_up", latency_ms=(time.perf_counter() - t0) * 1000)
 
         app.state.model_state = state
         yield

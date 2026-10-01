@@ -7,7 +7,7 @@ split:
   seed: 42
 
 train:
-  algorithm: tfidf-ridge     # only implemented value; "embeddings-ridge" reserved (ADR-0008, abordagem C)
+  algorithm: tfidf-ridge     # abordagem A, implementada; "embeddings-ft" é a abordagem C (spec 11, ADR-0009)
   seed: 42
   ridge:
     alpha: 1.0
@@ -20,6 +20,25 @@ train:
   context:
     ngram_range: [1, 2]
     weight: 0.5
+  embeddings:                 # só lido quando algorithm = embeddings-ft (spec 11); inerte em A
+    encoder:
+      source: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      revision: "e8f8c211226b894fcb81acc59f3b34ba3efd5f42"  # commit do hub em 2026-09-30 (Q3, spec 11 §10)
+      max_length: 128
+      device: auto            # auto | cpu | cuda
+      num_threads: null       # inferência; null = padrão do torch
+    context: {weight: 0.5}
+    probe: {alpha: 1.0, solver: lsqr}
+    finetune:
+      epochs_max: 5
+      patience: 2
+      batch_size: 16
+      lr_encoder: 2.0e-5
+      lr_head: 1.0e-3
+      weight_decay: 0.01
+      warmup_ratio: 0.1
+      dropout: 0.1
+      freeze_word_embeddings: true
 
 evaluate:
   quality_gate:

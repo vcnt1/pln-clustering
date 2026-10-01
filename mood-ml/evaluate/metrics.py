@@ -29,6 +29,10 @@ from transform.features import FEATURE_SPEC_VERSION
 
 logger = logging.getLogger("evaluate.metrics")
 
+TFIDF_RIDGE = "tfidf-ridge"
+EMBEDDINGS_FT = "embeddings-ft"
+SUPPORTED_ALGORITHMS = {TFIDF_RIDGE, EMBEDDINGS_FT}
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -92,6 +96,94 @@ def staging_path(staging_dir: Path, dataset_id: str, algorithm: str, fingerprint
     return Path(staging_dir) / dataset_id / algorithm / fingerprint
 
 
+def hyperparameters_for(algorithm: str, train_config: dict[str, Any]) -> dict[str, Any]:
+    """Escopa configs/pipeline.yaml: train por algoritmo (spec 06 §3.3), para que o
+    fingerprint de um algoritmo nunca mude por causa do bloco de configuração de
+    outro. `train_config` é o dict de `config["train"]` já sem a chave `algorithm`.
+    """
+    if algorithm == EMBEDDINGS_FT:
+        return {key: train_config[key] for key in ("seed", "embeddings") if key in train_config}
+    return {key: value for key, value in train_config.items() if key != "embeddings"}
+
+
+def training_identity(config: dict[str, Any], dataset_sha256: dict[str, str]) -> tuple[str, dict[str, Any], str]:
+    """Deriva (algorithm, hyperparameters, fingerprint) de `config` de forma
+    determinística — a mesma identidade que `train.train` e `pipeline.py` usam."""
+    train_config = dict(config.get("train", {}))
+    algorithm = train_config.pop("algorithm", TFIDF_RIDGE)
+    hyperparameters = hyperparameters_for(algorithm, train_config)
+    fingerprint = compute_training_fingerprint(dataset_sha256, algorithm, hyperparameters, FEATURE_SPEC_VERSION)
+    return algorithm, hyperparameters, fingerprint
+
+
+def required_artifacts(algorithm: str) -> tuple[str, ...]:
+    """Nomes (relativos ao diretório de staging) que precisam existir para o
+    staging estar completo. `encoder/` só entra para C (FT-R16)."""
+    base = ("baseline.joblib", "candidate.joblib", "train_manifest.json")
+    return (*base, "encoder") if algorithm == EMBEDDINGS_FT else base
+
+
+def load_model_artifact(staging: Path, algorithm: str, run_id: str | None = None) -> Any:
+    """Carrega `candidate.joblib` e, para C, vincula o encoder local
+    (`.attach()`, FT-R17) — no-op para o `Pipeline` de A, que já é
+    autossuficiente após o unpickle."""
+    candidate = _with_io_retry("load_candidate", lambda: joblib.load(staging / "candidate.joblib"), run_id)
+    if algorithm == EMBEDDINGS_FT:
+        candidate.attach(staging / "encoder")
+    return candidate
+
+
+def _measure_latency(candidate: Any, rows: pd.DataFrame) -> dict[str, float]:
+    """Latência item a item — nunca em lote (EV-R06). Função separada para ser
+    reusada tanto no corpus de teste real quanto na janela sintética de 30
+    mensagens (FT-R20)."""
+    latencies_ms: list[float] = []
+    for i in range(len(rows)):
+        row = rows.iloc[[i]]
+        t0 = perf_counter()
+        candidate.predict(row)
+        latencies_ms.append((perf_counter() - t0) * 1000)
+    return {
+        "p50_ms": float(np.percentile(latencies_ms, 50)) if latencies_ms else 0.0,
+        "p95_ms": float(np.percentile(latencies_ms, 95)) if latencies_ms else 0.0,
+        "sample_size": len(latencies_ms),
+    }
+
+
+def _build_history30_rows(test_df: pd.DataFrame, n_rows: int = 10) -> pd.DataFrame:
+    """FT-R20: o corpus de teste só chega a ~20 mensagens de contexto (spec 11
+    §6) — o pior caso de produção (histórico de 30 mensagens, `MAX_HISTORY_SIZE`
+    da spec 04) não aparece nele. Monta `n_rows` exemplos sintéticos com
+    contexto de 30 mensagens, ciclando pelo `text_clean` já existente no corpus
+    (nenhum dado novo é inventado, só reaproveitado)."""
+    pool = test_df["text_clean"].tolist()
+    n_rows = min(n_rows, len(test_df))
+    rows = [
+        {
+            "text_clean": test_df["text_clean"].iloc[i],
+            "context_clean": [pool[(i + j) % len(pool)] for j in range(30)],
+        }
+        for i in range(n_rows)
+    ]
+    return pd.DataFrame(rows)
+
+
+def _find_tfidf_ridge_eval(
+    dataset_id: str, config: dict[str, Any], dataset_sha256: dict[str, str], staging_dir: Path
+) -> dict[str, Any] | None:
+    """FT-R21: localiza o `eval.json` de `tfidf-ridge` para o mesmo
+    `dataset_id` pelo fingerprint que A teria com este mesmo config — nunca
+    por *glob*, para não ser ambíguo quando existe mais de um staging."""
+    train_config = dict(config.get("train", {}))
+    train_config.pop("algorithm", None)
+    hyperparameters = hyperparameters_for(TFIDF_RIDGE, train_config)
+    fingerprint = compute_training_fingerprint(dataset_sha256, TFIDF_RIDGE, hyperparameters, FEATURE_SPEC_VERSION)
+    eval_path = staging_path(staging_dir, dataset_id, TFIDF_RIDGE, fingerprint) / "eval.json"
+    if not eval_path.exists():
+        return None
+    return json.loads(eval_path.read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # evaluate_candidate — F1 (gate) -> F2 (load) -> F3 (metrics) -> F4 (gate)
 # ---------------------------------------------------------------------------
@@ -117,22 +209,20 @@ def evaluate_candidate(
     (same separation as validate_corpus/build_labels/build_dataset)."""
     staging_dir = Path(staging_dir)
     datasets_dir = Path(datasets_dir)
-    train_config = dict(config.get("train", {}))
-    algorithm = train_config.pop("algorithm", "tfidf-ridge")
+    algorithm = config.get("train", {}).get("algorithm", TFIDF_RIDGE)
+    dataset_sha256: dict[str, str] | None = None
 
     if fingerprint is None:
         dataset_sha256 = dataset_parquet_hashes(datasets_dir, dataset_id)
-        fingerprint = compute_training_fingerprint(dataset_sha256, algorithm, train_config, FEATURE_SPEC_VERSION)
+        algorithm, _hyperparameters, fingerprint = training_identity(config, dataset_sha256)
 
     staging = staging_path(staging_dir, dataset_id, algorithm, fingerprint)
     baseline_path = staging / "baseline.joblib"
-    candidate_path = staging / "candidate.joblib"
-    manifest_path = staging / "train_manifest.json"
-    if not (baseline_path.exists() and candidate_path.exists() and manifest_path.exists()):
+    if not all((staging / name).exists() for name in required_artifacts(algorithm)):
         raise EvaluateGateError("EV_R01_GATE_STAGING_NOT_OK", f"incomplete staging at {staging}")
 
     baseline = _with_io_retry("load_baseline", lambda: joblib.load(baseline_path), run_id)
-    candidate = _with_io_retry("load_candidate", lambda: joblib.load(candidate_path), run_id)
+    candidate = load_model_artifact(staging, algorithm, run_id)
 
     test_path = datasets_dir / dataset_id / "test.parquet"
     test_df = _with_io_retry("read_test_parquet", lambda: pd.read_parquet(test_path), run_id).reset_index(drop=True)
@@ -178,17 +268,7 @@ def evaluate_candidate(
     }
 
     # Latência item a item — nunca em lote (EV-R06).
-    latencies_ms: list[float] = []
-    for i in range(len(test_df)):
-        row = test_df.iloc[[i]]
-        t0 = perf_counter()
-        candidate.predict(row)
-        latencies_ms.append((perf_counter() - t0) * 1000)
-    latency = {
-        "p50_ms": float(np.percentile(latencies_ms, 50)) if latencies_ms else 0.0,
-        "p95_ms": float(np.percentile(latencies_ms, 95)) if latencies_ms else 0.0,
-        "sample_size": len(latencies_ms),
-    }
+    latency = _measure_latency(candidate, test_df)
 
     quality_gate_config = config.get("evaluate", {}).get("quality_gate", {})
     threshold_ratio = quality_gate_config.get("max_mae_ratio", 0.9)
@@ -211,6 +291,19 @@ def evaluate_candidate(
             "passed": gate_passed,
         },
     }
+
+    if algorithm == EMBEDDINGS_FT:
+        # FT-R20: pior caso de produção (30 mensagens), fora do gate.
+        eval_json["latency_history_30"] = _measure_latency(candidate, _build_history30_rows(test_df))
+
+        # FT-R21: comparação informativa com A, sem afetar o gate.
+        if dataset_sha256 is None:
+            dataset_sha256 = dataset_parquet_hashes(datasets_dir, dataset_id)
+        tfidf_ridge_eval = _find_tfidf_ridge_eval(dataset_id, config, dataset_sha256, staging_dir)
+        if tfidf_ridge_eval is not None:
+            tfidf_ridge_mae = tfidf_ridge_eval["metrics"]["candidate"]["mae"]
+            eval_json["comparison"] = {"mae_delta_vs_tfidf": candidate_metrics["mae"] - tfidf_ridge_mae}
+
     return EvalResult(eval_json=eval_json, gate_passed=gate_passed, staging_dir=staging, algorithm=algorithm)
 
 

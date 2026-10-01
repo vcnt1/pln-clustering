@@ -2,7 +2,7 @@
 
 **Status:** Aceita · **Versão da spec:** `if-1` · **Data:** 2026-09-20
 **Implementa:** [data-model.md §2.2](../../data-structure/data-model.md) (`POST /internal/v1/infer` — `InferRequest`/`InferResponse`).
-**Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`scale`, `mood_label = null`, recorte `[-1, 1]`), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (janela de 30 mensagens da conversa), [ADR-0004](../../decisions/ADR-0004-retentativa-e-quarentena.md) (sem retry no `mood-ml`, quarentena é do `mood-api`); [constitution.md](../../decisions/constitution.md) P1, P3, P4, P5; [04-transform.md](04-transform.md) (`extract_features`), [06-train-evaluate.md](06-train-evaluate.md) (`clip_score`), [07-registry.md](07-registry.md) (`active.json`, `manifest.json`)
+**Depende de:** [ADR-0001](../../decisions/ADR-0001-escala-do-humor.md) (`scale`, `mood_label = null`, recorte `[-1, 1]`), [ADR-0007](../../decisions/ADR-0007-humor-por-conversa.md) (janela de 30 mensagens da conversa), [ADR-0004](../../decisions/ADR-0004-retentativa-e-quarentena.md) (sem retry no `mood-ml`, quarentena é do `mood-api`); [constitution.md](../../decisions/constitution.md) P1, P3, P4, P5; [04-transform.md](04-transform.md) (`extract_features`), [06-train-evaluate.md](06-train-evaluate.md) (`clip_score`), [07-registry.md](07-registry.md) (`active.json`, `manifest.json`), [11-embeddings-finetuning.md](11-embeddings-finetuning.md) (carga local do encoder, aquecimento — IF-R23, IF-R24)
 **Consumido por:** `mood-api` (fora deste repositório de especificação — cliente HTTP interno)
 **Implementado em:** [infer/predict.py](../infer/predict.py), [main.py](../main.py)
 
@@ -50,9 +50,10 @@ Diferente de toda spec anterior, aqui a "carga" não é de dado, é de **modelo*
 | Situação | Desfecho |
 |---|---|
 | `models/active.json` não existe | O processo **sobe normalmente**, em **modo degradado**: nenhum modelo em memória. `GET /internal/v1/infer` responde `503 ml_unavailable` a qualquer chamada. É o estado legítimo de "ainda ninguém promoveu nada" (bootstrap do projeto, spec 07) |
-| `active.json` existe, mas `model_version` referenciado não tem `manifest.json` legível ou `model.joblib` corrompido/ausente | O processo **recusa subir** — encerra com falha antes de aceitar conexões. É um estado de registro quebrado, não um "ainda não" legítimo |
+| `active.json` existe, mas `model_version` referenciado não tem `manifest.json` legível ou `model.joblib` corrompido/ausente — inclui, QUANDO `algorithm = "embeddings-ft"`, `encoder/` ausente ou corrompido (spec 11, FT-R18) | O processo **recusa subir** — encerra com falha antes de aceitar conexões. É um estado de registro quebrado, não um "ainda não" legítimo |
+| `active.json` existe, `algorithm = "embeddings-ft"`, mas `torch`/`transformers` não estão instalados (spec 11, FT-R18) | O processo **recusa subir** — dependência ausente é tratada como registro quebrado, não como modo degradado |
 | `active.json` existe, modelo carrega, mas `manifest.feature_spec_version`/`history_window`/`history_scope`/`algorithm` diverge do que **este código** implementa | O processo **recusa subir** (P4) — servir mesmo assim significaria calcular features com uma premissa que o modelo não foi treinado para ver, silenciosamente |
-| `active.json` existe, modelo carrega, tudo compatível | Operação normal — modelo, manifesto e `model_version` ficam em memória para toda a vida do processo |
+| `active.json` existe, modelo carrega, tudo compatível | Operação normal — modelo, manifesto e `model_version` ficam em memória para toda a vida do processo; uma predição de aquecimento roda antes do processo aceitar conexões (IF-R23, abaixo) |
 
 **Por que os dois primeiros casos de falha são diferentes um do outro, apesar de os dois "impedirem servir corretamente".** `active.json` ausente é uma fase esperada do ciclo de vida do projeto — o serviço deve poder subir mesmo assim, para que operação e observabilidade (`/healthz`, §3.6) funcionem enquanto ninguém promoveu nada. Um `active.json` que aponta para algo quebrado, ou para um modelo incompatível com o código, é sempre um erro de configuração — subir mesmo assim esconderia o problema até a primeira requisição falhar (ou, pior, até uma requisição *não* falhar, mas processar com a premissa errada).
 
@@ -161,7 +162,8 @@ Mesmo formato das specs anteriores: JSON por linha em `stderr`/`stdout` do proce
 | INFO | `startup_started` | — |
 | WARNING | `startup_degraded` | `reason: "active_json_missing"` — serviço sobe sem modelo |
 | INFO | `model_loaded` | `model_version`, `algorithm`, `feature_spec_version`, `history_window`, `history_scope` |
-| ERROR | `startup_refused` | `reason` (`registry_broken` \| `feature_spec_mismatch`), `expected`, `found` — processo encerra logo em seguida |
+| INFO | `model_warmed_up` | `latency_ms` — predição de aquecimento concluída (IF-R24) |
+| ERROR | `startup_refused` | `reason` (`registry_broken` \| `feature_spec_mismatch` \| `embeddings_deps_missing`), `expected`, `found` — processo encerra logo em seguida |
 | WARNING | `io_retry` | `attempt`, `operation`, `errno` |
 
 ### 5.3 Eventos por requisição
@@ -238,6 +240,10 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 - **IF-R18** O caminho de requisição (passos 4–6, §2.3) DEVE NÃO realizar I/O de qualquer tipo.
 - **IF-R19** A leitura de `active.json`/`manifest.json`/`model.joblib` na subida DEVE retentar 3 vezes com *backoff* 1s/2s/4s antes de decidir entre os desfechos da §2.2.
 
+**Abordagem C (`embeddings-ft`, spec 11)**
+- **IF-R23** `SUPPORTED_ALGORITHMS` (verificado por IF-R04) DEVE incluir `"embeddings-ft"`. QUANDO `algorithm = "embeddings-ft"`, o carregamento DEVE usar `local_files_only=True` para o encoder (FT-R17) e DEVE recusar a subida (mesmo desfecho de IF-R03) QUANDO `encoder/` estiver ausente/corrompido ou QUANDO `torch`/`transformers` não estiverem instalados (FT-R18).
+- **IF-R24** O processo DEVE executar uma predição de aquecimento sobre o modelo carregado antes de aceitar a primeira conexão; a latência do primeiro `POST /internal/v1/infer` real DEVE NÃO incluir o custo de carga/primeira inferência do modelo (FT-R19). Aplica-se aos dois algoritmos — para A, o custo é desprezível; para C, é onde a maior parte do custo de carregar o encoder em memória se paga antes do primeiro cliente.
+
 **Segurança**
 - **IF-R20** Nenhum log DEVE conter `history[].text`, mascarado ou não, em nenhum nível, em nenhum evento.
 - **IF-R21** `extract_features` DEVE ser chamada para toda requisição válida, independentemente de o texto já chegar mascarado.
@@ -253,6 +259,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 | `IF_R09_INTERNAL_ERROR` | IF-R09 | 500 |
 | `IF_R03_STARTUP_REGISTRY_BROKEN` | IF-R03 | — (processo não sobe) |
 | `IF_R04_STARTUP_FEATURE_SPEC_MISMATCH` | IF-R04 | — (processo não sobe) |
+| `FT_R02_DEPS_MISSING` (embeddings-ft sem torch/transformers) | IF-R23 | — (processo não sobe) |
 
 ## 8. Decisões deste documento
 
@@ -283,7 +290,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 - **Quarentena e contagem de falhas consecutivas** — responsabilidade do `mood-api` (ADR-0004); `infer/` só garante que o sinal de falha é honesto.
 - **Autenticação entre `mood-api` e `mood-ml`** — README lista como "ainda não definida"; fora desta spec.
 - **Recarregamento em runtime (*hot reload*)** — decisão explícita (D2); um restart manual é o mecanismo do MVP.
-- **Abordagem C (embeddings)** — o `algorithm` do manifesto já é conferido (IF-R04); nenhuma lógica específica de C é tratada aqui.
+- **Lógica de treino/avaliação da abordagem C** (fine-tuning, *pooling*, montagem dos blocos) — spec 11. Esta spec só carrega o encoder local (IF-R23) e aquece o modelo (IF-R24); não decide nada sobre como C é treinada.
 - **Rate limiting, autenticação de borda, TLS** — infraestrutura de deploy, fora do escopo de `mood-ml`.
 - **Orquestração, CI e alvos de Makefile.** Spec 09.
 
@@ -292,6 +299,7 @@ Nenhuma referência a `duckdb`/`.duckdb` em `infer/` — mesma verificação de 
 - [ ] `main.py` — `lifespan`/evento de subida do FastAPI chamando o carregamento do modelo (IF-R01 a IF-R05)
 - [ ] Verificação de compatibilidade P4 contra constantes do código (`feature_spec_version`, `history_window`, `history_scope`, `algorithm` suportados)
 - [ ] Retentativa de I/O na subida (IF-R19)
+- [ ] QUANDO `embeddings-ft`: carga local do encoder (`local_files_only=True`), recusa de subida sem `encoder/` ou sem dependências, predição de aquecimento (IF-R23, IF-R24, spec 11 FT-R17 a FT-R19)
 - [ ] `POST /internal/v1/infer` — validação estrutural (`InferRequest`) e de negócio (papel de cada item de `history`) (IF-R06 a IF-R09)
 - [ ] Manipulador de exceção único para o formato `{"error_code","detail"}` (D5)
 - [ ] Integração com `extract_features` (spec 04) e o `Pipeline` carregado; `clip_score` (spec 06) antes da resposta (IF-R09 a IF-R14)

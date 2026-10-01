@@ -3,7 +3,7 @@
 **Status:** Aceita · **Versão da spec:** `cm-1` · **Data:** 2026-09-24
 **Implementa:** correção F3 do code review de 2026-09-24. Oito módulos repetiam retry de I/O, log estruturado, classes de erro e escrita atômica.
 **Depende de:** nenhuma. Não importa nenhum outro módulo do mood-ml.
-**Consumido por:** [02](02-ingest-validate.md), [03](03-labels.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md), [09](09-orquestracao-ci.md)
+**Consumido por:** [02](02-ingest-validate.md), [03](03-labels.md), [05](05-split.md), [06](06-train-evaluate.md), [07](07-registry.md), [08](08-infer.md), [09](09-orquestracao-ci.md), [11](11-embeddings-finetuning.md)
 **Implementado em:** `common/errors.py`, `common/io.py`, `common/log.py`
 
 ---
@@ -24,6 +24,7 @@ As cópias já tinham divergido. No ingest, o evento `io_retry` saía com o JSON
 | `common/io.py` | `IO_RETRY_BACKOFF_SECONDS = (1, 2, 4)` | Única definição do *backoff*. |
 | | `with_io_retry(operation, func, run_id=None, *, logger, error)` | Chama `func()`. Em `OSError`, loga `io_retry` (`attempt`, `operation`, `errno`) e retenta após 1s, 2s e 4s: são 4 tentativas no total. Esgotadas, levanta `error(detail)`, em que `error` é uma fábrica da exceção da camada. Outras exceções propagam sem retentativa. |
 | | `atomic_write(dest, write_tmp)` | Cria o diretório pai, chama `write_tmp(<dest>.tmp)` e faz `os.replace` para `dest`. Não faz retentativa própria: quem chama embrulha em `with_io_retry`. |
+| | `atomic_write_dir(dest, write_tmp_dir)` | Equivalente de `atomic_write` para diretórios (ex.: `encoder/` da abordagem C, spec 11). Pré-condição: `dest` não existe. Remove `<dest>.tmp` se sobrar de uma execução interrompida, chama `write_tmp_dir(<dest>.tmp)` (que cria o diretório) e faz `os.replace(<dest>.tmp, dest)`. Não faz retentativa própria, mesma disciplina de `atomic_write`. |
 | | `write_json(payload, path)` | `json.dump` com `indent=2, sort_keys=True, ensure_ascii=False`. |
 | | `write_json_atomic(payload, dest)` | `atomic_write` com `write_json`. Como `atomic_write`, não faz retentativa própria. |
 | `common/log.py` | `now_iso()`, `to_iso(dt)` | ISO-8601 UTC, com milissegundos e sufixo `Z`. |
@@ -38,6 +39,7 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - **CM-R01** `with_io_retry` DEVE retentar apenas `OSError`, no máximo 3 vezes, com espera de 1s, 2s e 4s, e DEVE levantar a exceção produzida por `error` quando as tentativas se esgotarem.
 - **CM-R02** QUANDO o formato for `json`, toda linha de log emitida via `common.log`, inclusive `io_retry`, DEVE ser um único objeto JSON com `ts`, `level` e `event` no nível raiz.
 - **CM-R03** `atomic_write` DEVE deixar em `dest` o conteúdo antigo ou o novo inteiro, nunca um arquivo parcial, e DEVE NÃO deixar `.tmp` após o sucesso.
+- **CM-R06** `atomic_write_dir` DEVE deixar em `dest` o diretório antigo (se já existia um staging anterior removido explicitamente por quem chama) ou o novo inteiro, nunca um diretório parcial, e DEVE NÃO deixar `<dest>.tmp` após o sucesso. QUANDO `<dest>.tmp` já existir de uma execução interrompida, DEVE removê-lo antes de escrever.
 - **CM-R04** `common/` DEVE NÃO conter regra de negócio, código de erro de camada nem importar outro pacote do mood-ml.
 - **CM-R05** Nenhum módulo fora de `common/` DEVE redefinir formatador de log, *backoff* de retentativa ou `time.sleep` de retentativa. Isso é verificado por teste.
 
@@ -57,6 +59,7 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - **CA-03** Um `ValueError` na primeira chamada → propaga na hora, sem *sleep*.
 - **CA-04** O `io_retry` capturado em `stderr` com formato `json` → `json.loads(linha)["event"] == "io_retry"`.
 - **CA-05** `atomic_write` com sucesso → `dest` com o conteúdo novo e nenhum `*.tmp` no diretório.
+- **CA-11** `atomic_write_dir` com sucesso → `dest` com o conteúdo novo e nenhum `*.tmp` no diretório; com um `<dest>.tmp` remanescente de uma execução interrompida, a chamada remove o resto antes de escrever e termina no mesmo estado limpo.
 - **CA-06** `log(..., run_id=None)` → a linha não tem a chave `run_id`; com `run_id="x"` → `"run_id": "x"`.
 - **CA-07** `configure_logging` chamado 2x no mesmo *logger* → um único *handler*.
 - **CA-08** Guarda anti-duplicação: nenhum `.py` fora de `common/` e `tests/` define subclasse de `logging.Formatter` (pela árvore sintática) nem contém `IO_RETRY_BACKOFF_SECONDS =`, `time.sleep(` ou `lambda tmp: write_json(`. Uma cópia de `common/log.py` fora de `common/` é acusada.
@@ -84,4 +87,5 @@ Cada camada mantém o seu próprio `logger` (`logging.getLogger("<pacote>.<módu
 - [x] Migrar `infer/predict.py` (`RegistryBrokenError(PipelineError)`)
 - [x] Suíte verde após cada migração (CA-09); `make all` de ponta a ponta sobre a fixture
 - [x] `write_json_atomic` no lugar do *lambda* aninhado nos 6 módulos (CA-10, CA-08)
+- [ ] `atomic_write_dir` em `common/io.py`, consumido por `train/train.py` e `registry/registry.py` para o diretório `encoder/` da abordagem C (CM-R06, CA-11, spec 11)
 - [x] Guarda de CM-R05 barra qualquer subclasse de `logging.Formatter` fora de `common/` (CA-08)

@@ -21,7 +21,6 @@ import registry.registry as registry_registry
 import train.train as train_train
 import transform.split as transform_split
 from common.log import configure_logging, log
-from transform.features import FEATURE_SPEC_VERSION
 
 logger = logging.getLogger("pipeline")
 _log = partial(log, logger)
@@ -53,10 +52,9 @@ def _recompute_fingerprint(dataset_id: str, config: dict[str, Any], datasets_dir
     """PL-R09: mesma fórmula que train.train usa internamente (spec 06
     §3.3), via as funções já públicas de evaluate.metrics — nunca lê o
     valor de volta de stdout/log de um passo anterior."""
-    train_cfg = dict(config.get("train", {}))
-    algorithm = train_cfg.pop("algorithm", "tfidf-ridge")
     dataset_sha256 = evaluate_metrics.dataset_parquet_hashes(datasets_dir, dataset_id)
-    return evaluate_metrics.compute_training_fingerprint(dataset_sha256, algorithm, train_cfg, FEATURE_SPEC_VERSION)
+    _algorithm, _hyperparameters, fingerprint = evaluate_metrics.training_identity(config, dataset_sha256)
+    return fingerprint
 
 
 def _find_model_version_by_fingerprint(models_dir: Path, fingerprint: str) -> str | None:

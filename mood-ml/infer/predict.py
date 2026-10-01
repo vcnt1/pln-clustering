@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from common.errors import PipelineError
 from common.io import with_io_retry
 from common.log import configure_logging, log
-from evaluate.metrics import clip_score
+from evaluate.metrics import EMBEDDINGS_FT, clip_score
 from train.train import SUPPORTED_ALGORITHMS
 from transform.features import FEATURE_SPEC_VERSION, MAX_HISTORY_SIZE, extract_features
 
@@ -75,6 +75,15 @@ class RegistryBrokenError(PipelineError):
         super().__init__("IF_R03_STARTUP_REGISTRY_BROKEN", detail)
 
 
+class EmbeddingsUnavailableError(PipelineError):
+    """IF-R23/FT-R18: manifest.algorithm == "embeddings-ft" mas torch/transformers
+    não estão instalados — mesmo desfecho de IF-R03 (processo não sobe), código
+    próprio porque a causa é ambiente, não registro corrompido."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("FT_R02_DEPS_MISSING", detail)
+
+
 class FeatureSpecMismatchError(Exception):
     """IF-R04: manifest.feature_spec_version/history_window/history_scope/
     algorithm diverge do que este código implementa (P4)."""
@@ -111,6 +120,15 @@ class ModelState:
     pipeline: Any | None
     model_version: str | None
     manifest: dict[str, Any] | None
+
+
+def _embeddings_runtime_available() -> bool:
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _check_compatibility(manifest: dict[str, Any]) -> None:
@@ -160,7 +178,16 @@ def load_active_model(models_dir: str | Path) -> ModelState:
         manifest = _with_io_retry(
             "read_manifest_json", lambda: json.loads(manifest_path.read_text(encoding="utf-8"))
         )
+        if manifest.get("algorithm") == EMBEDDINGS_FT:
+            # IF-R23/FT-R18: checado antes de desserializar — sem torch, nem o
+            # unpickle de model.joblib (que importa transform.embeddings) funciona.
+            if not _embeddings_runtime_available():
+                raise EmbeddingsUnavailableError("torch/transformers not installed for algorithm=embeddings-ft")
+            if not (model_dir / "encoder").exists():
+                raise RegistryBrokenError(f"missing encoder/ for model_version={model_version} at {model_dir}")
         pipeline = _with_io_retry("load_model_joblib", lambda: joblib.load(model_path))
+    except (EmbeddingsUnavailableError, RegistryBrokenError):
+        raise
     except _InferIOError as exc:
         raise RegistryBrokenError(str(exc)) from exc
     except json.JSONDecodeError as exc:
@@ -171,6 +198,13 @@ def load_active_model(models_dir: str | Path) -> ModelState:
         raise RegistryBrokenError(f"corrupted model.joblib at {model_path}: {exc}") from exc
 
     _check_compatibility(manifest)
+
+    if manifest.get("algorithm") == EMBEDDINGS_FT:
+        # FT-R17: local_files_only=True dentro de load_local_encoder (transform/embeddings.py).
+        try:
+            pipeline.attach(model_dir / "encoder")
+        except Exception as exc:
+            raise RegistryBrokenError(f"failed to attach encoder at {model_dir / 'encoder'}: {exc}") from exc
 
     return ModelState(pipeline=pipeline, model_version=model_version, manifest=manifest)
 
@@ -193,6 +227,18 @@ def run_inference(pipeline: Any, history: list[HistoryMessage]) -> float:
     }])
     raw = pipeline.predict(row)[0]
     return clip_score(raw)
+
+
+def warm_up(pipeline: Any) -> None:
+    """IF-R24/FT-R19: uma predição descartável sobre o modelo carregado, antes
+    do processo aceitar conexões — para A o custo é desprezível; para C é
+    onde o encoder entra em memória (e, se `device=cuda`, os kernels
+    inicializam) antes do primeiro cliente. Deliberadamente não chama
+    `run_inference`: os testes de contrato substituem `run_inference` antes
+    de subir o `TestClient`, e aquecer por esse caminho quebraria esse
+    *monkeypatch* (ver tests/contract/test_infer_api.py)."""
+    row = pd.DataFrame([{"text_clean": "warm up", "context_clean": [], "context_text": ""}])
+    pipeline.predict(row)
 
 
 # ---------------------------------------------------------------------------

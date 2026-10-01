@@ -1,0 +1,8 @@
+# Abordagem C (embeddings-ft, spec 11). requirements.txt permanece inalterado (FT-R03).
+# Em CI, torch é instalado antes desta lista com --index-url https://download.pytorch.org/whl/cpu
+# para evitar a build CUDA do índice padrão do PyPI; localmente, `pip install -r
+# requirements-embeddings.txt` sozinho traz a build que o pip escolher para a máquina
+# (ex.: CUDA, se a GPU for detectada).
+torch
+transformers
+safetensors
